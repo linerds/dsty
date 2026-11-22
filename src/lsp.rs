@@ -12,7 +12,7 @@
 //! потоці. Її факти кешуються й заново прив'язуються до коду на кожній
 //! статичній перевірці, тож під час набору зауваження не з'їжджають.
 //!
-//! Налаштування: `.dsty.toml` проєкту, поверх нього -- `initializationOptions`
+//! Налаштування: `.dsty.toml` проєкту, а поверх нього `initializationOptions`
 //! і `workspace/didChangeConfiguration` редактора.
 
 use std::collections::{HashMap, HashSet};
@@ -107,7 +107,7 @@ struct FullJob {
     typst: Option<PathBuf>,
 }
 
-/// Вміст відкритих буферів за канонічним шляхом: копія -- лише лічильник.
+/// Вміст відкритих буферів за канонічним шляхом: копіювання лише збільшує лічильник.
 type Overlays = HashMap<PathBuf, Buffer>;
 
 /// Наслідки останньої перевірки: з них будуються виправлення й підказки.
@@ -314,7 +314,7 @@ fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
 }
 
 /// Налаштування редактора: сам об'єкт або вкладений у `dsty`;
-/// відносні шляхи -- від робочої теки.
+/// відносні шляхи відраховуються від робочої теки.
 fn parse_settings(value: serde_json::Value, base: &Path) -> anyhow::Result<Config> {
     // Клієнт може надіслати налаштування всіх серверів (`{"dsty": …,
     // "tinymist": …}`): беремо свої
@@ -338,7 +338,7 @@ struct Server {
     full_jobs: Sender<FullJob>,
     generation: Arc<AtomicU64>,
     docs: Docs,
-    /// Робоча тека (чи поточна): від неї -- відносні шляхи налаштувань редактора.
+    /// Робоча тека (чи поточна): від неї відраховуються відносні шляхи налаштувань редактора.
     base: PathBuf,
     init_config: Config,
     client_config: Config,
@@ -361,7 +361,7 @@ struct Server {
 impl Server {
     /// Перечитує налаштування: файл проєкту (якщо змінився) і редактор.
     fn reload(&mut self) {
-        // Файл налаштувань -- від теки main-документа (з налаштувань
+        // Файл налаштувань шукається від теки main-документа (з налаштувань
         // редактора чи знайденого в робочій теці), інакше від відкритого
         // файлу, інакше від робочої теки
         let editor = self.init_config.clone().merged(self.client_config.clone());
@@ -520,7 +520,7 @@ impl Server {
                 continue;
             }
             for (n, fix) in diag.fixes.iter().enumerate() {
-                // Файл змінився з часу перевірки: виправлення вже не туди
+                // Файл змінився з часу перевірки: виправлення влучили б не туди
                 if fix
                     .edits
                     .iter()
@@ -550,10 +550,10 @@ impl Server {
             }
         }
         // Усі виправлення файлу одним кроком, разом із тими, що відкриваються
-        // після попередніх (як `check --fix`): лише якщо є що виправляти, а
-        // рахується -- при виборі дії (`codeAction/resolve`). Серед швидких
-        // виправлень -- від двох (одне вже є окремою дією), а `source.fixAll`
-        // при збереженні виправляє й одне
+        // після попередніх (як `check --fix`). Дія з'являється, лише якщо є що
+        // виправляти, а рахується при виборі дії (`codeAction/resolve`). Серед
+        // швидких виправлень вона є, коли зауважень хоч два (одне вже має окрему
+        // дію), а `source.fixAll` при збереженні виправляє й одне
         let fixable = diagnostics.iter().filter(is_fixable).count();
         let (kind, least) = if wants(&CodeActionKind::QUICKFIX) {
             (CodeActionKind::QUICKFIX, 2)
@@ -563,14 +563,14 @@ impl Server {
         if fixable >= least && wants(&kind) {
             actions.extend(self.fix_all_action(uri, FixScope::File, kind));
         }
-        // Увесь документ від main, з підключеними файлами, -- як
+        // Увесь документ від main з підключеними файлами, як
         // `check --fix`. Не `source.fixAll`: при збереженні не правити інших
         // файлів
         let document = CodeActionKind::new(FIX_DOCUMENT);
         if elsewhere && wants(&document) {
             actions.extend(self.fix_all_action(uri, FixScope::Document, document));
         }
-        // Повна перевірка на вимогу (без `full = true` -- теж)
+        // Повна перевірка на вимогу (працює й без `full = true`)
         let source = CodeActionKind::new("source.dsty.fullCheck");
         if is_typst(&path) && wants(&source) {
             actions.push(CodeActionOrCommand::CodeAction(CodeAction {
@@ -654,7 +654,7 @@ impl Server {
                 if fixed.count > 0 || in_document {
                     fixed
                 } else {
-                    // Файл, якого main не підключає, -- окремий документ, як у
+                    // Файл, якого main не підключає, є окремим документом, як у
                     // перевірці
                     let root = orphan_root(path, &target.root);
                     lint::fix_all(&root, path, &load, &self.options, only).ok()?
@@ -667,7 +667,7 @@ impl Server {
         if fixed.count == 0 {
             return None;
         }
-        // Кожен файл -- однією заміною всього тексту: виправлення кількох
+        // Кожен файл змінюється однією заміною всього тексту: виправлення кількох
         // проходів у позиціях початкового тексту не виразити
         let mut changes = HashMap::new();
         for (file, new) in &fixed.files {
@@ -759,7 +759,7 @@ impl Server {
         })
     }
 
-    /// Доповнення в коментарях: `// dstu-` -> вид коментаря, після `:` --
+    /// Доповнення в коментарях: `// dstu-` -> вид коментаря, після `:` ->
     /// назви правил.
     fn completion(&self, params: &CompletionParams) -> Option<CompletionResponse> {
         let at = &params.text_document_position;
@@ -770,7 +770,7 @@ impl Server {
         let comment = &prefix[prefix.rfind("//")? + 2..];
         let body = comment.trim_start();
         let items = if let Some(rest) = body.strip_prefix("dstu-ignore") {
-            // Після виду коментаря й двокрапки -- назви правил, яких ще немає
+            // Після виду коментаря й двокрапки пропонуються назви правил, яких ще немає
             let (_, list) = rest.split_once(':')?;
             let listed: Vec<&str> = list
                 .split([',', ' '])
@@ -872,7 +872,7 @@ impl Server {
                 let Some(path) = uri_path(&p.text_document.uri) else {
                     return;
                 };
-                // Синхронізація повна: остання зміна -- весь текст
+                // Синхронізація повна: остання зміна містить весь текст
                 if let Some(change) = p.content_changes.into_iter().last() {
                     lock(&self.docs).insert(
                         path,
@@ -963,7 +963,7 @@ impl Server {
         }
     }
 
-    /// Повна перевірка документа: якщо ввімкнена (чи `forced` -- командою) і
+    /// Повна перевірка документа: якщо ввімкнена (чи запущена командою, `forced`) і
     /// є що перевіряти.
     fn schedule_full(&self, forced: bool) {
         if !forced && self.settings.full != Some(true) {
@@ -995,7 +995,7 @@ impl FullWorker {
     fn run(mut self, rx: Receiver<FullJob>) {
         let mut last_error: Option<String> = None;
         while let Ok(mut job) = rx.recv() {
-            // Кілька збережень поспіль -- одна компіляція
+            // Кілька збережень поспіль дають одну компіляцію
             while let Ok(newer) = rx.try_recv() {
                 job = newer;
             }
@@ -1161,7 +1161,7 @@ fn worker(
         );
 
         let mut by_file: HashMap<Url, (Option<i32>, Vec<Diagnostic>)> = HashMap::new();
-        // Відкриті документи -- завжди, навіть без зауважень: редактор знає,
+        // Відкриті документи публікуються завжди, навіть без зауважень: редактор знає,
         // що їх перевірено
         for (path, buffer) in &job.overlays {
             if is_typst(path)
@@ -1232,8 +1232,8 @@ fn check_job(
         .map(|r| r.files.iter().cloned().collect())
         .unwrap_or_default();
     let mut covered = document.clone();
-    // Відкриті файли, яких main не підключає (чернетка, стара версія), --
-    // окремі документи
+    // Відкриті файли, яких main не підключає (чернетка, стара версія),
+    // перевіряються як окремі документи
     let mut orphans: Vec<&PathBuf> = overlays
         .keys()
         .filter(|p| is_typst(p) && !covered.contains(*p))
@@ -1446,7 +1446,7 @@ fn uri_path(uri: &Url) -> Option<PathBuf> {
     uri.to_file_path().ok().map(|p| canonical(&p))
 }
 
-/// Канонічний шлях; для ще не збереженого файлу -- канонічна тека й ім'я.
+/// Канонічний шлях; для ще не збереженого файлу канонічна тека й ім'я.
 fn canonical(path: &Path) -> PathBuf {
     path.canonicalize()
         .unwrap_or_else(|_| match (path.parent(), path.file_name()) {

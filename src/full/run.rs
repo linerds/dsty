@@ -1,6 +1,6 @@
 //! Запуск нативного `typst` користувача: один виклик `typst eval --in -` з
 //! обгорткою через stdin, межі часу й пам'яті. Середовище (PATH,
-//! `TYPST_PACKAGE_PATH`) -- як у процесу dsty.
+//! `TYPST_PACKAGE_PATH`) успадковується від процесу dsty.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -17,9 +17,9 @@ use super::facts::{Entry, Facts, Warning};
 /// Налаштування запуску.
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
-    /// Шлях до `typst`; без нього -- з `PATH`.
+    /// Шлях до `typst`; без нього typst шукають у `PATH`.
     pub typst: Option<PathBuf>,
-    /// Корінь проєкту для typst (`--root`); типово -- тека main-файлу, як у
+    /// Корінь проєкту для typst (`--root`); типово це тека main-файлу, як у
     /// `typst compile`.
     pub root: Option<PathBuf>,
     /// Межа часу компіляції (типово 60 с).

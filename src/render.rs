@@ -62,8 +62,8 @@ fn colors(s: Severity) -> (&'static str, &'static str, &'static str) {
     }
 }
 
-/// Зауваження з кодом. `file` -- шлях, як його показати; `text` -- поточний
-/// текст файлу.
+/// Зауваження з кодом. `file` є шляхом для показу, `text` поточним текстом
+/// файлу.
 pub fn diagnostic(d: &Diagnostic, file: &str, text: &str, color: bool) -> String {
     let p = Paint { on: color };
     let (name, header, tint) = colors(d.severity);
@@ -78,7 +78,7 @@ pub fn diagnostic(d: &Diagnostic, file: &str, text: &str, color: bool) -> String
         .collect();
     let len = |line: usize| lines.get(line).map_or(0, Vec::len);
 
-    // Основна позначка -- один рядок (зауваження обрізано до першого)
+    // Основна позначка займає один рядок (зауваження обрізано до першого)
     let line = d.start.line;
     let start = d.start.column.min(len(line));
     let end = if d.end.line == line {
@@ -199,7 +199,7 @@ pub fn diagnostic(d: &Diagnostic, file: &str, text: &str, color: bool) -> String
             } else {
                 pad.clone()
             };
-            // Продовження перенесеного рядка -- з відступом самого рядка
+            // Продовження перенесеного рядка має відступ самого рядка
             let indent = hanging_indent(chars).min(WIDTH / 4);
             let lead = match (k > 0, n == 0) {
                 (false, _) => String::new(),
@@ -211,7 +211,7 @@ pub fn diagnostic(d: &Diagnostic, file: &str, text: &str, color: bool) -> String
             } else {
                 ""
             };
-            // Текст шматка, позначені знаки -- кольором позначки
+            // Текст шматка; позначені знаки друкуються кольором позначки
             let style = |col: usize| match here.iter().find(|x| x.start <= col && col < x.end) {
                 Some(x) if x.primary => Some(tint),
                 Some(_) => Some(BLUE),
@@ -280,7 +280,7 @@ pub fn diagnostic(d: &Diagnostic, file: &str, text: &str, color: bool) -> String
     out
 }
 
-/// Знаки з кольорами: сусідні однакового кольору -- одним фрагментом.
+/// Знаки з кольорами: сусідні однакового кольору йдуть одним фрагментом.
 fn runs<'a>(p: &Paint, chars: impl Iterator<Item = (char, Option<&'a str>)>) -> String {
     let mut out = String::new();
     let mut run = String::new();
@@ -304,7 +304,7 @@ fn runs<'a>(p: &Paint, chars: impl Iterator<Item = (char, Option<&'a str>)>) -> 
 }
 
 /// Відступ продовження рядка: пробіли на початку, а в позиції переліку
-/// (`- `, `+ `, `1. `) -- ще й позначка.
+/// (`- `, `+ `, `1. `) ще й позначка.
 fn hanging_indent(line: &[char]) -> usize {
     let lead = line.iter().take_while(|c| **c == ' ').count();
     let rest = &line[lead..];
@@ -326,7 +326,7 @@ fn chunks(line: &[char]) -> Vec<(usize, usize)> {
     let mut start = 0;
     while line.len() - start > WIDTH {
         let limit = start + WIDTH;
-        // Останній пробіл у другій половині шматка, інакше -- жорсткий розрив
+        // Останній пробіл у другій половині шматка, інакше жорсткий розрив
         let cut = (start + WIDTH / 2..limit)
             .rev()
             .find(|&i| line[i] == ' ')
@@ -422,8 +422,8 @@ pub fn explain(rule: &crate::rules::Rule, color: bool, width: Option<usize>) -> 
 }
 
 /// Таблиця правил для `dsty rules`: назва, вид перевірки, пункти
-/// стандарту й опис. Пункти переносяться по комах у вузькій колонці, опис --
-/// по словах до ширини `width` (без неї -- [`RULES_WIDTH`]).
+/// стандарту й опис. Пункти переносяться по комах у вузькій колонці, опис
+/// по словах до ширини `width` (без неї до [`RULES_WIDTH`]).
 ///
 /// ```text
 /// ПРАВИЛО          ВИД               ПУНКТ          ОПИС
@@ -471,7 +471,7 @@ pub fn rules_table(rules: &[crate::rules::Rule], color: bool, width: Option<usiz
         .chain([len(header[1])])
         .max()
         .unwrap_or(0);
-    // Колонка пунктів -- за найдовшим пунктом із комою, але не вужча за два
+    // Ширина колонки пунктів береться за найдовшим пунктом із комою, але не вужча за два
     // короткі пункти в рядку
     let clause_w = rules
         .iter()

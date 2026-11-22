@@ -45,7 +45,7 @@ pub struct Rule {
     /// Проби повної перевірки, потрібні правилу ([`probe`]): з них збирається
     /// обгортка. Буває й у статичного правила з повною частиною.
     pub probes: u8,
-    /// Рекомендація стандарту («рекомендовано»), а не вимога: у редакторі --
+    /// Рекомендація стандарту («рекомендовано»), а не вимога: у редакторі це
     /// інформація, а не попередження.
     pub advice: bool,
     /// Типовий рівень зауважень (налаштовується `severity`).
@@ -88,7 +88,7 @@ impl Rule {
         self
     }
 
-    /// Правило повної перевірки з пробами `probes` (0 -- вистачає сторінок і
+    /// Правило повної перевірки з пробами `probes` (0, якщо вистачає сторінок і
     /// позицій елементів).
     const fn full(mut self, probes: u8) -> Self {
         self.full = true;
@@ -154,7 +154,7 @@ impl Rule {
         marks
     }
 
-    /// Розділ `docs/lint.md` пакунка nure з описом правила -- для правил, які
+    /// Розділ `docs/lint.md` пакунка nure з описом правила: для правил, які
     /// має й typst-версія лінтера в пакунку (інші описує підказка dsty).
     pub fn docs_section(&self) -> Option<&'static str> {
         Some(match self.code {
@@ -679,7 +679,7 @@ pub struct FixDraft {
 
 /// Заголовки структурних елементів, які не нумерують (7.1.18), і їхній ранг у
 /// порядку стандарту (3.2.1, 3.3.1, 3.4.1). Нумеровані розділи суті мають ранг
-/// 6, додатки -- 10.
+/// 6, додатки 10.
 const STRUCTURAL: &[(&str, u8)] = &[
     ("список авторів", 0),
     ("реферат", 1),
@@ -815,7 +815,7 @@ fn out_of_order(keys: &[Vec<u32>]) -> Option<usize> {
 
 /// Регістр першої літери тексту, якщо його варто перевіряти: літера стоїть у
 /// коді дослівно (не з `raw`, формули чи виклику) і слово не латиницею
-/// (латиницею -- назви й ідентифікатори: Windows, Python, `Dorm`).
+/// (латиницею пишуть назви й ідентифікатори: Windows, Python, `Dorm`).
 fn case_of(text: &Text) -> Option<Case> {
     let s = text.trimmed();
     let first = s.chars().next()?;
@@ -887,8 +887,8 @@ static UNIT_CHECKS: LazyLock<Vec<(&'static str, Regex, &'static str)>> = LazyLoc
 /// `[3]`, `[1, 4]`, `[2–5]`, але не `Keccak-f[1600]` чи `masiv[8]`.
 static CITATION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?:^|[^\p{L}\p{N}_\-])(\[\d+(?:\s*[,–-]\s*\d+)*\])").unwrap());
-/// Група номерних посилань: `[3]`, `[1, 4–6]`, `[2]–[5]` (номери -- група 1,
-/// кінець діапазону з дужками -- група 2).
+/// Група номерних посилань: `[3]`, `[1, 4–6]`, `[2]–[5]` (номери в групі 1,
+/// кінець діапазону з дужками в групі 2).
 pub(crate) static CITE_GROUP: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:^|[^\p{L}\p{N}_\-])\[(\d+(?:\s*[,;–—-]\s*\d+)*)\](?:\s*[–—-]\s*\[(\d+)\])?")
         .unwrap()
@@ -970,7 +970,7 @@ impl Checker<'_> {
         }
     }
 
-    /// Перше посилання на елемент; `Err` -- мітку з коду не дізнатися.
+    /// Перше посилання на елемент; `Err`, якщо мітку з коду не дізнатися.
     fn first_ref(&self, label: Option<&Label>) -> Result<Option<usize>, ()> {
         match label {
             None => Ok(None),
@@ -1086,7 +1086,7 @@ impl Checker<'_> {
                 }
             } else if h.level == 1 && h.numbered && structural.is_some() {
                 // `= Вступ` -> `#heading(numbering: none)[Вступ]`, мітка
-                // всередині -- після виклику
+                // зсередини переходить за виклик
                 let fix = h.markup.as_ref().map(|(node, body)| {
                     let label = match &h.label {
                         Some(Label::Name(l))
@@ -1211,7 +1211,7 @@ impl Checker<'_> {
     }
 
     /// Закриває заголовки рівня `level` і глибше: єдиний нумерований нащадок
-    /// -- порушення 7.4.6.
+    /// порушує 7.4.6.
     fn close(&mut self, open: &mut Vec<(&Heading, Vec<&Heading>)>, level: usize) {
         while open.last().is_some_and(|(h, _)| h.level >= level) {
             let (parent, children) = open.pop().unwrap();
@@ -1306,7 +1306,7 @@ impl Checker<'_> {
                     );
                 }
                 // Підзаголовки (другий рядок головки) можуть починатися з малої
-                // літери, тож регістр -- лише в однорядковій головці
+                // літери, тож регістр перевіряється лише в однорядковій головці
                 if header.single_row && case_of(cell) == Some(Case::Lower) {
                     self.add(
                         "table-header-case",
@@ -1324,7 +1324,7 @@ impl Checker<'_> {
         for (id, block) in doc.blocks.iter().enumerate() {
             let Block::List(list) = block else { continue };
             // Записи переліку джерел оформлюють за ДСТУ 8302, а перелік
-            // скорочень -- за 7.14, а не 7.7
+            // скорочень за 7.14, а не за 7.7
             if matches!(list.section, Some(BIBLIOGRAPHY | ABBREVIATIONS)) {
                 continue;
             }
@@ -1456,7 +1456,7 @@ impl Checker<'_> {
                             .collect(),
                     );
                 }
-                // У терміналі -- уся позиція (без вкладеного переліку)
+                // У терміналі показується вся позиція (без вкладеного переліку)
                 let context = Loc {
                     file: item.loc.file,
                     range: item.loc.range.start
@@ -1482,7 +1482,7 @@ impl Checker<'_> {
             let last = text.chars().last();
             let last_char = last.map_or(0, char::len_utf8);
             let fix = if ends_with_sentence_mark(text) {
-                // «Що це?:», «…:» -- речення краще переписати самому
+                // Для «Що це?:», «…:» виправлення немає: речення краще переписати самому
                 None
             } else if text.ends_with('.') {
                 last_char_fix(&par.text, "Замінити крапку на двокрапку", ":")
@@ -1842,7 +1842,7 @@ impl Checker<'_> {
     }
 
     /// Перелік скорочень за абеткою (7.14): терміни (`/ ЕОМ: …`), перша
-    /// колонка таблиці, позиції переліку чи абзаци «ЕОМ -- …» поспіль.
+    /// колонка таблиці, позиції переліку чи абзаци «ЕОМ – …» поспіль.
     fn abbreviations(&mut self) {
         let doc = self.doc;
         let mut groups: Vec<Vec<(String, Loc)>> = Vec::new();
@@ -1962,8 +1962,8 @@ impl Checker<'_> {
                 kinds.insert(name, kind);
             }
         }
-        // Підпис, заданий документом (`set figure(supplement: [рис.])`), --
-        // можливо, з малої літери: тоді регістр не перевіряється
+        // Підпис, заданий документом (`set figure(supplement: [рис.])`),
+        // може бути з малої літери: тоді регістр не перевіряється
         let lowercase = |target: &str| {
             doc.set_rule(target, "supplement")
                 .and_then(|s| s.value("supplement"))
@@ -2004,7 +2004,7 @@ impl Checker<'_> {
                 range: node.range.end..node.range.end,
             };
             if !word.is_empty() && stems.iter().any(|s| lower.starts_with(s)) {
-                // Слово вже є: друкується «рисунку Рисунок 2.1». Слово -- у
+                // Слово вже є: друкується «рисунку Рисунок 2.1». Слово переходить у
                 // підпис посилання: `@fig[рисунку]` друкує «рисунку 2.1», і
                 // посиланням стає весь вираз
                 let text = doc.files[node.file].source.text();
@@ -2082,8 +2082,8 @@ impl Checker<'_> {
                 for c in CITE_GROUP.captures_iter(text.as_str()) {
                     let whole = c.get(0).unwrap();
                     let start = whole.start() + whole.as_str().find('[').unwrap_or(0);
-                    // Дужки з формули чи коду (`$[3, 6]$`, `` `a[2]` ``) -- не
-                    // посилання: лише набрані в тексті дослівно
+                    // Дужки з формули чи коду (`$[3, 6]$`, `` `a[2]` ``) не є
+                    // посиланнями: беруться лише набрані в тексті дослівно
                     if !text.is_exact_at(start) {
                         continue;
                     }
@@ -2153,7 +2153,7 @@ impl Checker<'_> {
                     )],
                 }
             };
-            // Позначка -- на закривальному `$`, перед яким бракує коми
+            // Позначка стоїть на закривальному `$`, перед яким бракує коми
             self.add(
                 "formula-comma",
                 Some(Loc {
@@ -2236,7 +2236,7 @@ fn cite_numbers(c: &regex::Captures) -> Vec<u32> {
     {
         out.extend(last + 1..=end);
     }
-    // Роки й номери стандартів у дужках («[2020]») -- не посилання
+    // Роки й номери стандартів у дужках («[2020]») не є посиланнями
     out.retain(|&n| (1..=500).contains(&n));
     out
 }
@@ -2248,7 +2248,7 @@ fn ends_with_sentence_mark(text: &str) -> bool {
 }
 
 /// Перший номер групи посилань, що порушує порядок першої згадки:
-/// (номер, очікуваний). `seen` -- найбільший номер, згаданий досі.
+/// (номер, очікуваний). `seen` містить найбільший номер, згаданий досі.
 pub(crate) fn cite_out_of_order(c: &regex::Captures, seen: &mut u32) -> Option<(u32, u32)> {
     for n in cite_numbers(c) {
         if n == *seen + 1 {
@@ -2281,7 +2281,7 @@ fn sentence_start(before: &str) -> bool {
     if !t.ends_with(['.', '!', '?', '…']) {
         return false;
     }
-    // «див.», «рис.», «т. д.» -- скорочення, а не кінець речення
+    // «див.», «рис.», «т. д.» є скороченнями, а не кінцем речення
     let word = last_word(t).to_lowercase();
     let word = word.trim_end_matches('.');
     !matches!(

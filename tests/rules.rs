@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use dsty::lint::{self, Diagnostic, Options, Report};
 
-/// Перевіряє проєкт з файлів у пам'яті; main -- перший файл.
+/// Перевіряє проєкт з файлів у пам'яті; main є першим файлом.
 fn run_files(files: &[(&str, &str)], options: &Options) -> Report {
     let root = PathBuf::from("/project");
     let map: HashMap<PathBuf, String> = files
@@ -65,7 +65,7 @@ fn structural_numbering_and_order() {
         fixed(&format!("{DSTU}= Вступ <intro>\nТекст.\n")),
         format!("{DSTU}#heading(numbering: none)[Вступ] <intro>\nТекст.\n")
     );
-    // Без шаблону й з явним вимкненням -- ні
+    // Без шаблону й з явним вимкненням не нумерується
     assert!(rules("= Вступ\n").is_empty());
     assert!(
         rules(&format!(
@@ -113,7 +113,7 @@ fn figures() {
 ";
     let diags = run(src);
     let found: Vec<_> = diags.iter().map(|d| (d.rule, pointed(src, d))).collect();
-    // Перше посилання -- пов'язане місце
+    // Перше посилання стає пов'язаним місцем
     assert_eq!(diags[2].related[0].1.line, 6);
     assert_eq!(
         found,
@@ -205,7 +205,7 @@ fn list_period_in_the_middle_and_semicolon_at_the_end() {
     assert!(out.contains("+ друга;\n+ третя.\n"), "{out}");
     assert!(out.contains("+ останній;\n"), "{out}");
 
-    // Дві помилки в одній позиції -- два зауваження; кілька речень -- теж «;»
+    // Дві помилки в одній позиції дають два зауваження; після кількох речень теж «;»
     let src = "Кроки:\n+ Відкрито вікно.\n+ натиснуто кнопку. Далі X.\n+ кінець.\n";
     assert_eq!(rules(src), ["list-case", "list-punct", "list-punct"]);
 }
@@ -271,7 +271,7 @@ fn appendices_from_recipe_and_include() {
     let app = "= Код програми <code>\nТекст.\n";
     let report = run_files(&[("main.typ", main), ("app.typ", app)], &Options::default());
     let found: Vec<_> = report.diagnostics.iter().map(|d| d.rule).collect();
-    // `= Вступ` нумерується (шаблон), а додаток -- після переліку джерел
+    // `= Вступ` нумерується (шаблон), а додаток іде після переліку джерел
     assert_eq!(found, ["heading-numbered"]);
     assert_eq!(report.files.len(), 2);
 }
@@ -325,7 +325,7 @@ fn units_are_optional() {
     assert!(out.contains("відстань 5~мм"), "{out}");
     assert!(out.contains("Плата 80 мм × 25 мм × 50 мм,"), "{out}");
     assert!(out.contains("від 1 мм до 5 мм і"), "{out}");
-    // `--` у коді -- не той самий текст, тож без виправлення
+    // `--` у коді не збігається з текстом, тож без виправлення
     assert!(out.contains("10--20 МГц"), "{out}");
 }
 
@@ -371,7 +371,7 @@ fn broken_source_still_checked() {
 
 #[test]
 fn fix_all_repeats_until_stable() {
-    // Велика літера й крапка: спершу лише list-case, після нього -- крапка
+    // Велика літера й крапка: спершу лише list-case, після нього крапка
     let src = "Визначити:\n1. Швидкість потоку.\n2. Обрати модуляцію.\n3. розробити схему.\n";
     let root = PathBuf::from("/project");
     let main = root.join("main.typ");
@@ -405,12 +405,12 @@ fn structure_names() {
         ]
     );
     assert_eq!(fixed(src), "= Висновки\n== Перелік джерел посилання\n");
-    // Великими літерами -- великими й виправлення
+    // Для набраного великими літерами виправлення теж великими
     assert_eq!(
         fixed("= СПИСОК ЛІТЕРАТУРИ\n"),
         "= ПЕРЕЛІК ДЖЕРЕЛ ПОСИЛАННЯ\n"
     );
-    // Записи переліку джерел під неканонічною назвою -- не перелік за 7.7
+    // Записи переліку джерел під неканонічною назвою не перевіряються як перелік за 7.7
     assert_eq!(
         rules("= Список літератури\n+ Іванов І. Книга. 2020\n+ Петров П. Стаття. 2021\n"),
         ["structure-name"]
@@ -460,7 +460,7 @@ fn note_numbering() {
         fixed(src),
         "Примітка 1. Перша.\n\nПримітка 2. Друга.\n\nПримітка 3. Третя.\n"
     );
-    // Окремі примітки в різних місцях -- кожна одна
+    // Окремі примітки в різних місцях: кожна сама по собі
     assert!(rules("Примітка. Одна.\n\nТекст.\n\nПримітка. Інша.\n").is_empty());
 }
 
@@ -487,7 +487,7 @@ fn manual_keywords() {
             .0
             .contains("АЛГОРИТМ, БАЗА ДАНИХ, ЗАТРИМКА, МЕРЕЖА, ЯКІСТЬ.\n")
     );
-    // Кількість -- і для набраних вручну
+    // Кількість перевіряється й для набраних вручну
     assert_eq!(
         rules("= Реферат\nАЛГОРИТМ, БАЗА ДАНИХ, МЕРЕЖА.\n"),
         ["keywords-count"]
@@ -521,7 +521,7 @@ fn abbreviations_order() {
 
 #[test]
 fn case_only_for_plain_text() {
-    // Код, формула й латиниця на початку -- назви, а не регістр речення
+    // Код, формула й латиниця на початку означають назви, а не регістр речення
     let src = "Класи:\n- `Dorm` має кімнати;\n- Windows -- система;\n- $X$ -- змінна;\n- Кінець.\n";
     let diags = run(src);
     assert_eq!(diags.len(), 1, "{diags:?}");
@@ -556,7 +556,7 @@ fn list_violations_are_grouped() {
 
 #[test]
 fn heading_from_string() {
-    // `#heading("ІСПИТ")` -- заголовок з рядка, а не порожній
+    // `#heading("ІСПИТ")` дає заголовок з рядка, а не порожній
     assert!(rules("#heading(\"ІСПИТ\")\nТекст.\n").is_empty());
     assert_eq!(rules("#heading(\"Розділ.\")\n"), ["heading-period"]);
 }
@@ -605,7 +605,7 @@ $ x = 1 $ <e>
     assert!(out.contains("в @t[табл.]."), "{out}");
     assert!(out.contains("(@t[табл.])"), "{out}");
     assert!(out.contains("Згідно з @e[формулою]"), "{out}");
-    // Власний підпис з малої літери чи власне show-правило ref -- не перевіряється
+    // Власний підпис з малої літери чи власне show-правило ref не перевіряються
     let src = "#set figure(supplement: [рис.])\nНа @f.\n#figure(rect(), caption: [Схема]) <f>\n";
     assert!(rules(src).is_empty());
     let src = "#show ref: it => it\nНа @f.\n#figure(rect(), caption: [Схема]) <f>\n";
@@ -627,7 +627,7 @@ fn citation_order() {
     // Перелік джерел і додатки не враховуються
     let src = "Текст [1].\n= Перелік джерел посилання\n+ [3] Книга.\n";
     assert!(!rules(src).contains(&"citation-order"));
-    // Інтервал у формулі й індекс у коді -- не посилання
+    // Інтервал у формулі й індекс у коді не є посиланнями
     let src = "Інтервал $[3, 6]$, масив `a [2]`, а джерело [1].\n";
     let diags = run(src);
     let found: Vec<_> = diags.iter().map(|d| (d.rule, pointed(src, d))).collect();
@@ -645,13 +645,13 @@ fn formula_comma() {
         fixed(src),
         "Маємо\n$ a = b, $\n$ c = d, $\n$ e = f. $\nде $a$ -- щось.\n"
     );
-    // Позначка -- на закривальному `$`, наступна формула -- пов'язане місце
+    // Позначка стоїть на закривальному `$`, наступна формула стає пов'язаним місцем
     assert_eq!(pointed(src, &diags[0]), "$");
     assert_eq!(diags[0].related[0].3, "наступна формула");
     assert_eq!(diags[0].context, Some((1, 2)));
-    // Текст між формулами -- окремі речення
+    // Текст між формулами робить їх окремими реченнями
     assert!(rules("$ a = b $\nабо\n$ c = d $\n").is_empty());
-    // Код, перелік термінів, таблиця між формулами -- теж не «поспіль»
+    // Код, перелік термінів, таблиця між формулами теж розривають «поспіль»
     for between in [
         "```\ncode\n```",
         "/ Термін: опис",
@@ -661,7 +661,7 @@ fn formula_comma() {
         let src = format!("$ a = b $\n{between}\n$ c = d $\n");
         assert!(rules(&src).is_empty(), "{between}: {:?}", run(&src));
     }
-    // Проміжок чи розрив сторінки -- не текст
+    // Проміжок чи розрив сторінки не вважаються текстом
     assert_eq!(rules("$ a = b $\n#v(1em)\n$ c = d $\n"), ["formula-comma"]);
 }
 
@@ -689,7 +689,7 @@ fn no_fix_after_question_or_ellipsis() {
 
 #[test]
 fn ignore_comment_problems() {
-    // Помилка в назві -- з підказкою й виправленням
+    // Помилка в назві дає підказку й виправлення
     let src = "// dstu-ignore-next-line: list-cse\n- Велика.\n";
     let diags = run(src);
     let found: Vec<_> = diags.iter().map(|d| (d.rule, pointed(src, d))).collect();
@@ -718,6 +718,6 @@ fn ignore_comment_problems() {
 
     // Правила повної перевірки без компіляції не перевірялися: не зайві
     assert!(rules("// dstu-ignore-file: page-size, heading-numbered\nТекст.\n").is_empty());
-    // Без переліку (усі правила) -- теж
+    // Без переліку (усі правила) теж
     assert!(rules("Текст. // dstu-ignore\n").is_empty());
 }

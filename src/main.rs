@@ -18,7 +18,7 @@ use dsty::rules::{self, RULES};
 /// компіляції, тож працює з будь-якою версією шаблону й Typst; повна
 /// (`--full`) ще й компілює документ нативним `typst` проєкту.
 ///
-/// Налаштування проєкту -- у `.dsty.toml` у теці документа чи вище.
+/// Налаштування проєкту лежать у `.dsty.toml` у теці документа чи вище.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
@@ -30,8 +30,8 @@ struct Cli {
 enum Command {
     /// Перевірити документи й надрукувати зауваження.
     ///
-    /// Код виходу: 0 -- зауважень немає (або лише підказки й рекомендації),
-    /// 1 -- є зауваження, 2 -- помилка.
+    /// Код виходу: 0, якщо зауважень немає (або є лише підказки й рекомендації),
+    /// 1, якщо є зауваження, 2 у разі помилки.
     Check(CheckArgs),
     /// Запустити LSP-сервер на stdio.
     Lsp,
@@ -54,7 +54,7 @@ struct CheckArgs {
     /// `src/main.typ` чи `main.typ`.
     #[arg(required = true)]
     paths: Vec<PathBuf>,
-    /// Корінь проєкту для шляхів `/…` (як `typst --root`); типово -- тека
+    /// Корінь проєкту для шляхів `/…` (як `typst --root`); типово це тека
     /// main-файлу або найближча вище, де знаходяться всі імпорти `/…`.
     #[arg(long)]
     root: Option<PathBuf>,
@@ -74,8 +74,8 @@ struct CheckArgs {
     #[arg(long)]
     fix: bool,
     /// Повна перевірка: скомпілювати документ нативним `typst` і перевірити
-    /// сторінки, стилі й номери. Без typst чи з помилкою компіляції --
-    /// лише статична перевірка.
+    /// сторінки, стилі й номери. Без typst чи з помилкою компіляції
+    /// лишається тільки статична перевірка.
     #[arg(long)]
     full: bool,
     /// `typst` для повної перевірки (типово з PATH).
@@ -84,7 +84,7 @@ struct CheckArgs {
     /// Формат виводу (типово `pretty` у терміналі, інакше `text`).
     #[arg(long, value_enum)]
     format: Option<Format>,
-    /// Наприкінці -- скільки зауважень кожного правила.
+    /// Наприкінці надрукувати, скільки зауважень дало кожне правило.
     #[arg(long)]
     statistics: bool,
 }
@@ -150,7 +150,7 @@ fn print_rules(format: RulesFormat) {
     }
 }
 
-/// stdout -- термінал.
+/// Чи stdout є терміналом.
 fn tty() -> bool {
     std::io::stdout().is_terminal()
 }
@@ -173,7 +173,7 @@ fn explain(code: &str) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Main-файл за шляхом: файл -- як є, тека -- її `src/main.typ` чи `main.typ`.
+/// Main-файл за шляхом: сам файл або `src/main.typ` чи `main.typ` теки.
 fn main_file(path: &Path) -> anyhow::Result<PathBuf> {
     if path.is_dir() {
         for candidate in ["src/main.typ", "main.typ"] {
@@ -194,7 +194,7 @@ fn check(args: CheckArgs) -> anyhow::Result<ExitCode> {
     let colored = format == Format::Pretty && color();
     let mut mains: Vec<PathBuf> = Vec::new();
     for path in &args.paths {
-        // Той самий документ двічі (`dsty check . src/main.typ`) -- один раз
+        // Той самий документ двічі (`dsty check . src/main.typ`) перевіряється один раз
         let main = main_file(path)?;
         if !mains.contains(&main) {
             mains.push(main);
@@ -390,7 +390,7 @@ fn check_one(args: &CheckArgs, main: &Path) -> anyhow::Result<(Vec<Diagnostic>, 
 
 /// Записує файл через тимчасовий поруч і перейменування: збій посеред запису
 /// (повний диск) не лишає документ обрізаним. Символьне посилання лишається
-/// посиланням (пишеться файл, на який воно вказує), права -- ті самі.
+/// посиланням (пишеться файл, на який воно вказує), права не змінюються.
 fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     let target = path.canonicalize()?;
     let name = target.file_name().unwrap_or_default().to_string_lossy();

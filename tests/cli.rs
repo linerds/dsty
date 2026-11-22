@@ -63,7 +63,7 @@ fn check_and_fix() {
     );
 }
 
-/// `--fix` через символьне посилання правит файл, на який воно вказує, і не
+/// `--fix` через символьне посилання править файл, на який воно вказує, і не
 /// лишає тимчасових файлів.
 #[cfg(unix)]
 #[test]
@@ -120,7 +120,7 @@ fn lists_rules() {
 
 #[test]
 fn root_from_absolute_imports() {
-    // `/lib.typ` лежить у теці вище, ніж main: корінь -- вона
+    // `/lib.typ` лежить у теці вище, ніж main: корінем стає вона
     let dir = temp_dir("root");
     std::fs::create_dir_all(dir.join(".git")).unwrap();
     std::fs::create_dir_all(dir.join("work")).unwrap();
@@ -178,9 +178,9 @@ fn project_config_and_formats() {
         stdout.trim(),
         "::notice file=work/src/main.typ,line=3,col=3,endLine=3,endColumn=10,title=dsty%3A list-case::позиція переліку з великої літери: «Перший.» (п. 7.7.4)"
     );
-    // Лише інформація -- код виходу 0
+    // Лише інформація: код виходу 0
     assert_eq!(output.status.code(), Some(0));
-    // Без файлу налаштувань -- обидва правила
+    // Без файлу налаштувань спрацьовують обидва правила
     let output = dsty()
         .current_dir(&dir)
         .args(["check", "work", "--no-config", "--format", "json"])

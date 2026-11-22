@@ -14,7 +14,7 @@
 //! list-punct = "hint"        # error, warning, info, hint або off
 //! ```
 //!
-//! Відносні шляхи -- від теки файлу налаштувань.
+//! Відносні шляхи відраховуються від теки файлу налаштувань.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -50,7 +50,7 @@ impl Level {
     }
 }
 
-/// Налаштування з файлу чи редактора. Порожнє поле -- не задано.
+/// Налаштування з файлу чи редактора. Порожнє поле означає, що значення не задано.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct Config {
@@ -88,7 +88,7 @@ impl Config {
         None
     }
 
-    /// Читає файл налаштувань; відносні шляхи -- від його теки.
+    /// Читає файл налаштувань; відносні шляхи відраховуються від його теки.
     pub fn load(path: &Path) -> anyhow::Result<Config> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("читання {}", path.display()))?;
@@ -98,7 +98,7 @@ impl Config {
         Ok(config)
     }
 
-    /// Відносні шляхи -- від теки `base`. Назву `typst` без теки
+    /// Відносні шляхи відраховуються від теки `base`. Назву `typst` без теки
     /// (`typst-0.15`) шукають у `PATH`, тож її не чіпаємо.
     pub fn resolve_paths(&mut self, base: &Path) {
         let bare = self
@@ -131,7 +131,7 @@ impl Config {
         self
     }
 
-    /// Правила для перевірки: `off` -- те саме, що `ignore`.
+    /// Правила для перевірки: `off` діє так само, як `ignore`.
     pub fn options(&self) -> Options {
         let mut options = Options {
             ignore: self.ignore.clone(),
@@ -185,7 +185,7 @@ mod tests {
             config.main.as_deref(),
             Some(Path::new("/course/src/main.typ"))
         );
-        // Назва без теки -- з PATH
+        // Назву без теки шукаємо в PATH
         assert_eq!(config.typst.as_deref(), Some(Path::new("typst-0.15")));
         let mut config: Config = toml::from_str("typst = \"bin/typst\"\n").unwrap();
         config.resolve_paths(Path::new("/course"));

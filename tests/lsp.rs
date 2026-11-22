@@ -112,7 +112,7 @@ fn diagnostics_and_quick_fixes() {
     std::fs::create_dir_all(&dir).unwrap();
     let dir: PathBuf = dir.canonicalize().unwrap();
     let main = dir.join("main.typ");
-    // На диску -- без зауважень; відкритий буфер має перевагу
+    // На диску файл без зауважень; відкритий буфер має перевагу
     std::fs::write(&main, "Текст.\n").unwrap();
     let uri = format!("file://{}", main.display());
 
@@ -182,7 +182,7 @@ fn diagnostics_and_quick_fixes() {
             .contains("Вимкнути list-case")
     );
 
-    // Буфер змінився: старі виправлення вже не пропонуються, нові -- після перевірки
+    // Буфер змінився: старі виправлення вже не пропонуються, нові з'являються після перевірки
     client.notify(
         "textDocument/didChange",
         json!({
@@ -241,7 +241,7 @@ fn full_check_on_open() {
         "textDocument/didOpen",
         json!({ "textDocument": { "uri": uri, "languageId": "typst", "version": 1, "text": text } }),
     );
-    // Спершу статичні зауваження, потім -- з фактами компіляції
+    // Спершу статичні зауваження, потім з фактами компіляції
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let diags = client.wait_diagnostics(&uri);
@@ -259,7 +259,7 @@ fn full_check_on_open() {
 }
 
 /// «Виправити все» з `codeAction/resolve`: заміна рахується лише при виборі
-/// дії; з `only: source.fixAll` (при збереженні) -- лише ця дія.
+/// дії; з `only: source.fixAll` (при збереженні) пропонується лише ця дія.
 #[test]
 fn fix_all_is_resolved_lazily() {
     let dir = std::env::temp_dir().join(format!("dsty-lsp-resolve-{}", std::process::id()));
@@ -316,7 +316,7 @@ fn fix_all_is_resolved_lazily() {
 }
 
 /// `source.fixAll` виправляє й єдине зауваження файлу, а «Виправити все в
-/// документі» -- як `check --fix`: main і підключені файли однією дією.
+/// документі» працює як `check --fix`: main і підключені файли однією дією.
 #[test]
 fn fix_all_single_and_whole_document() {
     let dir = std::env::temp_dir().join(format!("dsty-lsp-document-{}", std::process::id()));
@@ -347,7 +347,7 @@ fn fix_all_single_and_whole_document() {
         "textDocument/didOpen",
         json!({ "textDocument": { "uri": uri, "languageId": "typst", "version": 1, "text": main_text } }),
     );
-    // Зауваження обох файлів -- в одній публікації перевірки
+    // Зауваження обох файлів приходять в одній публікації перевірки
     let mut seen = std::collections::HashMap::new();
     while seen.len() < 2 {
         let msg = client.wait("publishDiagnostics", |m| {
@@ -384,7 +384,7 @@ fn fix_all_single_and_whole_document() {
         "= Розділ\n#include \"ch.typ\"\n"
     );
 
-    // Без `only`: швидке виправлення й увесь документ, а «у файлі» -- ні,
+    // Без `only`: швидке виправлення й увесь документ, а «у файлі» немає,
     // бо воно таке саме, як швидке
     let actions = client.request(
         "textDocument/codeAction",
@@ -451,7 +451,7 @@ fn comments_config_and_settings() {
     let dir: PathBuf = dir.canonicalize().unwrap();
     let main = dir.join("main.typ");
     std::fs::write(&main, "").unwrap();
-    // Файл проєкту: list-case -- підказка
+    // Файл проєкту: list-case має рівень підказки
     std::fs::write(dir.join(".dsty.toml"), "[severity]\nlist-case = \"hint\"\n").unwrap();
     let uri = format!("file://{}", main.display());
 
@@ -479,7 +479,7 @@ fn comments_config_and_settings() {
     );
     assert_eq!(diags[1]["severity"], 4);
 
-    // Доповнення після двокрапки -- назви правил
+    // Доповнення після двокрапки пропонує назви правил
     let items = client.request(
         "textDocument/completion",
         json!({ "textDocument": { "uri": uri }, "position": { "line": 0, "character": 32 } }),

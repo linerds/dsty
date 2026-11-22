@@ -3,7 +3,8 @@
 //! Typst не віддає рядків коду, тож кожен елемент потоку прив'язується до
 //! моделі ([`crate::model`]): мітка, текст заголовка чи назви, початок абзацу,
 //! порядок. Неприв'язане зауваження стає на найближчий прив'язаний елемент
-//! перед ним, а налаштування документа -- на `set`-правило чи рядок шаблону.
+//! перед ним, а зауваження до налаштувань документа стає на `set`-правило чи
+//! рядок шаблону.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::LazyLock;
@@ -33,7 +34,7 @@ static CAPTION_NUMBER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*([\dА-ЯҐЄІЇA-Z]+(?:\.\d+)*)(\.?)\s*$").unwrap());
 static EQ_NUMBER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(\(([^()]*)\)|(\d+(?:\.\d+)*))\s*$").unwrap());
-/// Позначка нумерованого переліку: «а)», «1)» (латинська «a)» -- окреме зауваження).
+/// Позначка нумерованого переліку: «а)», «1)» (латинська «a)» дає окреме зауваження).
 static ENUM_MARK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([а-яґєіїa]|\d+)\)$").unwrap());
 static APPENDIX_WORD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(додаток)\s*([^\s.]+)?").unwrap());
@@ -76,8 +77,8 @@ fn norm(s: &str) -> String {
 }
 
 /// Зіставляє елементи потоку з елементами моделі: спершу за однаковими
-/// ключами в тому самому порядку, потім проміжки між зіставленими -- за
-/// порядком, якщо в них порівну елементів. `None` у ключі -- без ключа.
+/// ключами в тому самому порядку, потім у проміжках між зіставленими за
+/// порядком, якщо в них порівну елементів. `None` у ключі означає, що ключа немає.
 fn align(stream: &[Option<String>], model: &[Option<String>]) -> Vec<Option<usize>> {
     let mut out = vec![None; stream.len()];
     let mut used = vec![false; model.len()];
@@ -138,7 +139,7 @@ struct Checker<'a> {
     out: Vec<Found>,
     /// Прив'язка записів потоку до коду.
     locs: Vec<Option<Loc>>,
-    /// Для кожного запису -- найближчий прив'язаний не пізніше за нього.
+    /// Для кожного запису: найближчий прив'язаний не пізніше за нього.
     nearest: Vec<Option<usize>>,
     /// Запис потоку заголовка -> заголовок моделі.
     heading_model: HashMap<usize, &'a Heading>,
@@ -151,7 +152,7 @@ struct Checker<'a> {
     /// Номер розділу (перший рівень, не додаток) для кожного запису.
     chapter_of: Vec<Option<i64>>,
     pages: BTreeMap<usize, &'a Page>,
-    /// Перший заголовок: усе до нього -- титульний аркуш.
+    /// Перший заголовок: усе до нього належить титульному аркушу.
     body_start: usize,
     /// Звичний абзацний відступ основного тексту, pt.
     indent: f64,
@@ -380,7 +381,7 @@ impl<'a> Checker<'a> {
         let stream = self.indices(
             |i| matches!(i, Item::Par(p) if p.kind.is_empty() || p.kind == "l" || p.kind == "b"),
         );
-        // Ключ -- перші 24 літери й цифри: абзаци різняться вже на початку
+        // Ключ складається з перших 24 літер і цифр: абзаци різняться вже на початку
         let key = |s: &str| {
             let n: String = norm(s).chars().take(24).collect();
             (n.chars().count() >= 6).then_some(n)
@@ -564,7 +565,7 @@ impl<'a> Checker<'a> {
             .join(" ")
     }
 
-    /// Чи запис -- вміст сторінки (а не службовий запис, виноска чи номер).
+    /// Чи запис належить до вмісту сторінки (а не службовий запис, виноска чи номер).
     fn is_content(item: &Item) -> bool {
         match item {
             Item::Par(p) => p.kind != "n",
@@ -638,7 +639,7 @@ impl<'a> Checker<'a> {
         fn shown(p: &Page) -> Option<&str> {
             p.num.as_deref().map(str::trim).filter(|n| !n.is_empty())
         }
-        // Титульний аркуш -- перша сторінка без заголовків (у відповідях на
+        // Титульним аркушем вважається перша сторінка без заголовків (у відповідях на
         // іспит, наприклад, його немає)
         let title_page = pages.first().is_some_and(|(pg, _)| {
             !self
@@ -756,8 +757,8 @@ impl<'a> Checker<'a> {
 
     fn headings(&mut self) {
         let heads = self.indices(|i| matches!(i, Item::Heading { .. }));
-        // Оформлення заголовків: спершу збирається, потім -- по заголовках чи
-        // одне зауваження на весь документ ([`Self::report_spread`])
+        // Оформлення заголовків спершу збирається, а потім дає зауваження на кожному
+        // заголовку чи одне на весь документ ([`Self::report_spread`])
         let mut upper = Vec::new();
         let mut bold = Vec::new();
         let mut sizes = Vec::new();
@@ -780,7 +781,7 @@ impl<'a> Checker<'a> {
             let runs = self.heading_runs(i);
             let model = self.heading_model.get(&i).copied();
             // Заголовок, який друкує шаблон (`bibliography`), у коді не набрано:
-            // у повідомленні -- як надруковано
+            // у повідомленні він стоїть так, як надруковано
             let title = model
                 .filter(|h| !h.generated)
                 .map_or(body.as_str(), |h| h.title.trimmed());
@@ -836,7 +837,7 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            // 6.2.2: заголовок додатка -- малими літерами з першої великої
+            // 6.2.2: заголовок додатка набирають малими літерами з першої великої
             // (над ним «ДОДАТОК А» великими)
             if is_appendix {
                 let title: Vec<&Run> = text_runs
@@ -899,7 +900,7 @@ impl<'a> Checker<'a> {
                 ));
             }
 
-            // Розміщення (7.1.21): заголовки 2-го рівня й нижче -- з абзацного
+            // Розміщення (7.1.21): заголовки 2-го рівня й нижче починаються з абзацного
             // відступу. Мітка першого прогону стоїть там, де починається рядок,
             // лише коли рядок не вирівняно посередині, тож заголовки першого
             // рівня (їх можна посередині) за позицією не перевіряються.
@@ -926,7 +927,7 @@ impl<'a> Checker<'a> {
             if !runs.is_empty() && runs.iter().any(|(_, r)| r.hyph == Some(true)) {
                 let (left, right) = self.text_area(entry.pg);
                 let width: f64 = runs.iter().filter_map(|(_, r)| r.w).sum();
-                // y першого прогону -- верх блоку, решти -- рядки тексту
+                // y першого прогону дає верх блоку, y решти дає рядки тексту
                 let ys: Vec<f64> = runs.iter().skip(1).map(|(j, _)| self.e[*j].y).collect();
                 let lines = ys.windows(2).filter(|w| (w[1] - w[0]).abs() > 3.0).count() + 1;
                 if lines > 1 || width > right - left - self.indent {
@@ -1069,8 +1070,8 @@ impl<'a> Checker<'a> {
     }
 
     /// Номери за порядком для надрукованих `printed` (запис, номер): наскрізно
-    /// або в межах розділу (якщо так пронумеровано більшість), у додатках -- з
-    /// літерою додатка. `None` -- номер у межах розділу, якого не видно.
+    /// або в межах розділу (якщо так пронумеровано більшість), у додатках з
+    /// літерою додатка. `None`: номер у межах розділу, якого не видно.
     fn expected_numbers(&self, printed: &[(usize, String)]) -> Vec<Option<String>> {
         let main: Vec<&(usize, String)> = printed
             .iter()
@@ -1251,8 +1252,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // Надрукований номер -- перший прогін-номер після слова
-                // після слова-підпису (хоч би яке воно було)
+                // Надрукований номер: перший прогін-номер після слова-підпису
+                // (хоч би яке воно було)
                 if let Some(k) = caption_runs.iter().skip(1).take(3).position(|(_, r)| {
                     CAPTION_NUMBER.is_match(&r.t) && r.t.chars().any(|c| c.is_alphanumeric())
                 }) {
@@ -1363,7 +1364,7 @@ impl<'a> Checker<'a> {
             "у підписах рисунків і таблиць номер і назву розділено не тире",
         );
 
-        // 7.5.6--7.5.8, 7.6.4--7.6.6, 7.15.3: нумерація
+        // 7.5.6–7.5.8, 7.6.4–7.6.6, 7.15.3: нумерація
         for (is_table, list) in numbers {
             let name = if is_table {
                 "таблиці"
@@ -1415,7 +1416,7 @@ impl<'a> Checker<'a> {
             let Item::Table { header, repeat } = self.e[start].item else {
                 continue;
             };
-            // Таблиця у фігурі: зауваження -- на її назві
+            // Таблиця у фігурі: зауваження стає на її назву
             let owner = (0..start)
                 .rev()
                 .take_while(|&j| !matches!(self.e[j].item, Item::Par(_) | Item::Heading { .. }))
@@ -1528,7 +1529,7 @@ impl<'a> Checker<'a> {
                 })
                 .flatten()
                 .collect();
-            // Номер -- суцільний ланцюжок прогонів у кінці (кожен починається
+            // Номер складається із суцільного ланцюжка прогонів у кінці (кожен починається
             // там, де закінчився попередній)
             let mut tail: Vec<(usize, &Run)> = Vec::new();
             for &(j, r) in runs.iter().rev() {
@@ -1592,15 +1593,15 @@ impl<'a> Checker<'a> {
             {
                 let loc = self.loc(j);
                 // Відступ, як його надруковано: положення слова «де» від
-                // лівого берега. Без запису -- з налаштувань абзацу
+                // лівого берега. Без запису відступ береться з налаштувань абзацу
                 let printed = (j + 1..self.e.len())
                     .take_while(|&k| !matches!(self.e[k].item, Item::Par(_)))
                     .find(|&k| matches!(&self.e[k].item, Item::Run(r) if r.kind == "w"))
                     .map(|k| self.e[k].x - self.text_area(self.e[k].pg).0);
                 let indent = printed.unwrap_or(if p.all { p.indent } else { 0.0 });
                 if p.lead_break {
-                    // `\` перед «де» дає порожній рядок, а «де» -- з другого
-                    // рядка без відступу
+                    // `\` перед «де» дає порожній рядок, а «де» стоїть на другому
+                    // рядку без відступу
                     self.add(
                         "formula-where-indent",
                         loc,
@@ -1650,7 +1651,7 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // 7.10.3--7.10.5: наскрізно або в межах розділу, у додатках -- з
+        // 7.10.3–7.10.5: наскрізно або в межах розділу, у додатках з
         // літерою. Без усіх номерів порядок не перевірити
         if unread > 0 {
             return;
@@ -1821,7 +1822,7 @@ impl<'a> Checker<'a> {
                 Self::is_content(&self.e[j].item) && !matches!(&self.e[j].item, Item::Run(_))
             });
             let after_block = prev.is_some_and(|j| !matches!(self.e[j].item, Item::Par(_)));
-            // «де …» і примітки -- без відступу за стандартом (окремі правила)
+            // «де …» і примітки стандарт друкує без відступу (окремі правила)
             let note = p.head.trim_start().starts_with("Примітк");
             if starts_with_where(&p.head) || note || !self.locs[i].is_some() {
                 continue;
@@ -1830,7 +1831,7 @@ impl<'a> Checker<'a> {
                 first_after_block = Some(i);
             }
             let effective = if !p.all && after_block { 0.0 } else { p.indent };
-            // Перший абзац після блоку з `all: false` -- окреме зауваження вище
+            // Перший абзац після блоку з `all: false` має окреме зауваження вище
             if d > 0.0 && (effective - d).abs() > 0.5 && (p.all || !after_block) {
                 odd.push((i, effective));
             }
@@ -1954,7 +1955,7 @@ impl<'a> Checker<'a> {
                     current_par = None
                 }
                 Item::Run(r) if r.kind.is_empty() || r.kind == "l" || r.kind == "b" => {
-                    // Колонтитул (номер сторінки) -- не основний текст
+                    // Колонтитул (номер сторінки) не належить до основного тексту
                     if self.in_margin(i) {
                         continue;
                     }
@@ -1972,7 +1973,7 @@ impl<'a> Checker<'a> {
                         }
                         _ => current_par.unwrap_or(i),
                     };
-                    // Шрифт і кегль -- лише відхилення від свого абзацу: стиль
+                    // Шрифт і кегль перевіряються лише як відхилення від свого абзацу: стиль
                     // усього абзацу вже записано з абзацу, а прогону без абзацу
                     // (позначка переліку) порівняти нема з чим
                     let par = match &self.e[at].item {
@@ -2037,9 +2038,9 @@ impl<'a> Checker<'a> {
     }
 
     /// Зауваження по елементах (абзацах, заголовках, переліках) або, якщо
-    /// порушення в більшості з них, одне -- на налаштуванні документа: причина
+    /// порушення в більшості з них, одне на налаштуванні документа: причина
     /// тоді одна, і зауваження на кожному елементі лише заважають. В одному
-    /// елементі -- одне зауваження.
+    /// елементі не більше одного зауваження.
     fn report_spread(
         &mut self,
         code: &str,
@@ -2196,7 +2197,7 @@ impl<'a> Checker<'a> {
                 _ => None,
             })
             .collect();
-        // Сторінок -- за останнім записом: запис сторінки документ міг перекрити
+        // Кількість сторінок береться з останнього запису: запис сторінки документ міг перекрити
         let pages = self
             .e
             .iter()
@@ -2342,7 +2343,7 @@ impl Checker<'_> {
         if !self.e.iter().any(|x| matches!(x.item, Item::Cite { .. })) {
             return;
         }
-        // Надруковані посилання: прогони `z` підряд -- одна група («[1, 2]»)
+        // Надруковані посилання: прогони `z` підряд утворюють одну групу («[1, 2]»)
         let mut groups: Vec<(usize, String)> = Vec::new();
         let mut open = false;
         for i in 0..self.e.len() {

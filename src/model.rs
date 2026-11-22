@@ -72,9 +72,9 @@ pub struct RefUse {
 /// `bibliography(…)` чи `set bibliography(…)`: аргументи, які перевіряє стандарт.
 #[derive(Debug)]
 pub struct Bib {
-    /// `full: true` -- місце значення.
+    /// Місце значення `full: true`.
     pub full: Option<Loc>,
-    /// `style: "назва"` -- назва й місце рядка.
+    /// Назва й місце рядка в `style: "назва"`.
     pub style: Option<(String, Loc)>,
 }
 
@@ -121,8 +121,8 @@ impl Doc {
     }
 
     /// Налаштування `target` усередині елемента `selector` (`show heading:
-    /// set text(size: …)`), інакше -- налаштування самого `selector`
-    /// (`set heading(…)`), інакше -- як [`Self::setting`].
+    /// set text(size: …)`), інакше налаштування самого `selector`
+    /// (`set heading(…)`), інакше те саме, що [`Self::setting`].
     pub fn setting_in(&self, selector: &str, target: &str, args: &[&str]) -> Loc {
         self.find_set(Some(selector), target, args)
             .or_else(|| self.find_set(None, selector, &[]))
@@ -214,7 +214,7 @@ pub struct Heading {
     /// Заголовок, який друкує шаблон (`abstract` -> «Реферат», `bib` -> «Перелік
     /// джерел посилання»): у коді його тексту немає, тож без виправлень.
     pub generated: bool,
-    /// Заголовок розмітки (`= Назва`): місце вузла й код назви без мітки --
+    /// Заголовок розмітки (`= Назва`): місце вузла й код назви без мітки
     /// для виправлення на `#heading(…)[…]`.
     pub markup: Option<(Loc, String)>,
 }
@@ -248,7 +248,7 @@ pub struct Header {
 }
 
 impl Header {
-    /// `columns` -- кількість колонок, якщо її видно з коду.
+    /// Кількість колонок `columns`, якщо її видно з коду.
     fn new(cells: Vec<Text>, columns: Option<usize>) -> Self {
         Header {
             single_row: columns.is_some_and(|c| cells.len() <= c),
@@ -308,7 +308,7 @@ pub fn build(root: &Path, main: &Path, load: &dyn Fn(&Path) -> Option<String>) -
 
 /// Корінь проєкту для шляхів `/…` (як `typst --root`): тека main-файлу, а
 /// якщо імпорти й `#include` main-файлу вказують на `/…`, якого там немає, чи
-/// виходять за неї через `..` -- найближча тека вище, у якій усі вони
+/// виходять за неї через `..`, то найближча тека вище, у якій усі вони
 /// знаходяться. Вище теки з `typst.toml` чи `.git` не піднімається.
 pub fn detect_root(main: &Path, load: &dyn Fn(&Path) -> Option<String>) -> PathBuf {
     let Some(dir) = main.parent() else {
@@ -589,7 +589,7 @@ impl Walker<'_> {
                         let mut text = Text::default();
                         self.inline_markup(cx, term.term(), &mut text);
                         texts.push(text);
-                        // Опис -- заради посилань у ньому
+                        // Опис обходимо заради посилань у ньому
                         let mut ignored = Text::default();
                         self.inline_markup(cx, term.description(), &mut ignored);
                     }
@@ -718,7 +718,7 @@ impl Walker<'_> {
         });
     }
 
-    /// Перелік: тексти позицій без вкладених переліків; вкладені -- окремо
+    /// Перелік: тексти позицій без вкладених переліків; вкладені йдуть окремо
     /// після нього, без перевірки двокрапки.
     fn list(&mut self, cx: &Cx, items: &[(SyntaxNode, ast::Markup)], nested: bool, scope: Scope) {
         let prev_par = match self.last {
@@ -736,7 +736,7 @@ impl Walker<'_> {
                 match e {
                     Expr::ListItem(_) | Expr::EnumItem(_) => {
                         let is_enum = matches!(e, Expr::EnumItem(_));
-                        // Інший вид вкладеного переліку -- окремий перелік
+                        // Інший вид вкладеного переліку стає окремим переліком
                         if inner_enum.is_some_and(|en| en != is_enum) {
                             rest.push(std::mem::take(&mut inner));
                         }
@@ -853,7 +853,7 @@ impl Walker<'_> {
                 }
                 out.push_mapped(&node.full_text(), cx.file, cx.range(node));
             }
-            // `link(<мітка>)[текст]` -- теж посилання на елемент
+            // `link(<мітка>)[текст]` теж посилається на елемент
             Some("link") => {
                 if let Some(Expr::Label(l)) = positional(call).first() {
                     self.add_ref(l.get());
@@ -873,7 +873,7 @@ impl Walker<'_> {
     // --- Виклики функцій --------------------------------------------------------
 
     /// Виклик у розмітці (`markup`) чи в коді: блокові елементи, обгортки
-    /// шаблонів, решта -- як вбудований текст.
+    /// шаблонів, решта обробляється як вбудований текст.
     fn call(
         &mut self,
         cx: &Cx,
@@ -889,7 +889,7 @@ impl Walker<'_> {
             "heading" | "nheading" => {
                 self.flush();
                 let mut title = Text::default();
-                // Назва -- вміст або рядок: `#heading("ІСПИТ")`
+                // Назва буває вмістом або рядком: `#heading("ІСПИТ")`
                 let body = named(call, "body")
                     .or_else(|| content_args(call).last().copied())
                     .or_else(|| {
@@ -1028,7 +1028,7 @@ impl Walker<'_> {
             }
             _ if is_block_name(name) || !in_markup || has_blocks(call) => {
                 // Контейнер (`align`, `block`, власна обгортка з абзацами): його
-                // вміст -- окремі абзаци
+                // вміст складається з окремих абзаців
                 self.flush();
                 if matches!(name, "table" | "grid") {
                     self.table_terms(cx, call);
@@ -1233,7 +1233,7 @@ impl Walker<'_> {
             }
             let name = path.join(".");
             match show.transform() {
-                // `show footnote.entry: set text(size: 12pt)` -- налаштування елемента
+                // `show footnote.entry: set text(size: 12pt)` налаштовує сам елемент
                 Expr::SetRule(set) => self.record_set(cx, set, Some(name)),
                 _ if name == "ref" => self.doc.custom_ref = true,
                 _ => {}
@@ -1377,7 +1377,7 @@ fn label_value(expr: Expr) -> Label {
     }
 }
 
-/// Заголовок, увесь текст якого -- код (`= #lorem(3)`, `#heading[#f]`): для
+/// Заголовок, увесь текст якого є кодом (`= #lorem(3)`, `#heading[#f]`): для
 /// повідомлень береться сам код.
 fn code_title(cx: &Cx, title: &mut Text, body: &SyntaxNode) {
     if title.trimmed().is_empty() {
@@ -1480,7 +1480,7 @@ fn content_args(call: ast::FuncCall) -> Vec<Expr> {
         .collect()
 }
 
-/// Кількість колонок таблиці: без аргументу -- одна, як у typst; `None` --
+/// Кількість колонок таблиці: без аргументу одна, як у typst; `None`, якщо
 /// її задано виразом, значення якого з коду не видно.
 fn columns(expr: Option<Expr>) -> Option<usize> {
     match expr {

@@ -2,9 +2,9 @@
 //! виправленнями, з урахуванням коментарів `// dstu-ignore`.
 //!
 //! Коментарі:
-//! - `// dstu-ignore: правило, …` -- у тому ж рядку, що й зауваження;
-//! - `// dstu-ignore-next-line: правило` -- для наступного рядка;
-//! - `// dstu-ignore-file: правило` -- для всього файлу.
+//! - `// dstu-ignore: правило, …` у тому ж рядку, що й зауваження;
+//! - `// dstu-ignore-next-line: правило` для наступного рядка;
+//! - `// dstu-ignore-file: правило` для всього файлу.
 //!
 //! Без переліку правил коментар вимикає всі.
 
@@ -26,7 +26,7 @@ pub struct Options {
     pub ignore: Vec<String>,
     /// Додаткові правила (`optional`), які ввімкнути.
     pub enable: Vec<String>,
-    /// Рівень зауважень правил (типово -- [`Rule::severity`]).
+    /// Рівень зауважень правил (типово [`Rule::severity`]).
     pub severity: HashMap<String, Severity>,
 }
 
@@ -63,7 +63,7 @@ pub struct Diagnostic {
     pub related: Vec<(PathBuf, Pos, Pos, String)>,
     /// Рядки (з 0, включно) елемента навколо зауваження, які варто показати.
     pub context: Option<(usize, usize)>,
-    /// Виправлення: спершу суть, останнім -- вимкнути правило для рядка.
+    /// Виправлення: спершу суть, останнім вимкнення правила для рядка.
     pub fixes: Vec<Fix>,
 }
 
@@ -122,7 +122,7 @@ pub fn validate(options: &Options) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Чи перевіряти правило: не вимкнене, а необов'язкове -- увімкнене.
+/// Чи перевіряти правило: воно не вимкнене, а необов'язкове ще й увімкнене.
 pub fn is_active(options: &Options, code: &str) -> bool {
     !options.ignore.iter().any(|r| r == code)
         && (!rules::find(code).is_some_and(|r| r.optional)
@@ -185,7 +185,7 @@ pub fn check_full(
             !suppressions[f.loc.file].covers(f.rule.code, line)
         })
         .collect();
-    // Самі коментари: невідомі правила й коментарі, що нічого не вимикають
+    // Самі коментарі: невідомі правила й коментарі, що нічого не вимикають
     for (file, s) in suppressions.iter().enumerate() {
         found.extend(s.report(file, &doc.files[file].source, facts.is_some(), &active));
     }
@@ -338,7 +338,7 @@ fn diagnostic(doc: &Doc, options: &Options, found: Found) -> Diagnostic {
             .as_ref()
             .filter(|c| c.file == found.loc.file)
             .map(|c| {
-                // Останній байт елемента -- на межі знака
+                // Останній байт елемента, вирівняний на межу знака
                 let text = source.text();
                 let mut end = c.range.end.min(text.len()).max(c.range.start + 1) - 1;
                 while end > 0 && !text.is_char_boundary(end) {
@@ -430,7 +430,7 @@ pub struct Fixed {
 
 /// Виправляє все, що можна, доки є що виправляти: одне виправлення може
 /// відкрити наступне (позиція з великої літери й крапкою спершу отримує лише
-/// `list-case`, а після нього -- «крапка посеред переліку»). `only` обмежує
+/// `list-case`, а після нього й «крапку посеред переліку»). `only` обмежує
 /// виправлення одним файлом.
 pub fn fix_all(
     root: &Path,
@@ -441,7 +441,7 @@ pub fn fix_all(
 ) -> anyhow::Result<Fixed> {
     let mut files: HashMap<PathBuf, String> = HashMap::new();
     let mut count = 0;
-    // Проходів небагато: кожен лише прибирає зауваження, а межа -- від зациклення
+    // Проходів небагато: кожен лише прибирає зауваження, а межа захищає від зациклення
     for _ in 0..10 {
         let current = |path: &Path| files.get(path).cloned().or_else(|| load(path));
         let report = check(root, main, &current, options)?;
@@ -504,13 +504,13 @@ struct Suppressions {
 
 /// Один коментар `dstu-ignore`.
 struct Suppression {
-    /// Рядок, який він вимикає (`None` -- увесь файл).
+    /// Рядок, який він вимикає (`None` означає весь файл).
     line: Option<usize>,
     /// Байти коментаря у файлі.
     comment: std::ops::Range<usize>,
-    /// Правила й місце кожної назви; порожньо -- усі.
+    /// Правила й місце кожної назви; порожній перелік означає всі правила.
     rules: Vec<(String, std::ops::Range<usize>)>,
-    /// Що справді вимкнуло зауваження: кожне правило (чи «усі» -- нульове).
+    /// Що справді вимкнуло зауваження: кожне правило (для «усі» нульове).
     used: Vec<bool>,
 }
 
@@ -607,7 +607,7 @@ impl Suppressions {
 
     /// Невідомі правила й коментарі, що нічого не вимкнули. Невикористаним
     /// вважається лише правило, яке справді перевірялося: увімкнене, а для
-    /// правил з повною частиною -- лише з фактами компіляції.
+    /// правил з повною частиною ще й за наявності фактів компіляції.
     fn report(
         &self,
         file: usize,
@@ -620,8 +620,8 @@ impl Suppressions {
         let (unknown_on, unused_on) = (active("ignore-unknown"), active("ignore-unused"));
         for e in &self.entries {
             let removal = |range: &std::ops::Range<usize>| -> FixDraft {
-                // Єдине правило (чи «усі») -- увесь коментар, інакше -- назва
-                // з комою
+                // Для єдиного правила (чи «усі») прибирається весь коментар, інакше
+                // назва з комою
                 let range = if e.rules.len() <= 1 {
                     comment_span(source.text(), e.comment.clone())
                 } else {
@@ -716,7 +716,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-/// Увесь коментар: якщо він єдиний у рядку -- з рядком, інакше -- з
+/// Увесь коментар: разом з рядком, якщо він єдиний у рядку, інакше з
 /// пробілами перед ним.
 fn comment_span(text: &str, range: std::ops::Range<usize>) -> std::ops::Range<usize> {
     let line_start = text[..range.start].rfind('\n').map_or(0, |i| i + 1);

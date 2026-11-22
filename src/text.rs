@@ -70,7 +70,7 @@ impl Text {
         &self.s[self.trimmed_range()]
     }
 
-    /// Сегмент з байтом `byte` (або останній, якщо `byte` -- кінець тексту).
+    /// Сегмент з байтом `byte` (або останній, якщо `byte` стоїть у кінці тексту).
     /// Сегменти йдуть підряд, тож пошук двійковий.
     fn seg_at(&self, byte: usize) -> Option<&Seg> {
         let i = self.segs.partition_point(|seg| seg.at.end <= byte);
@@ -87,7 +87,7 @@ impl Text {
     }
 
     /// Місце шматка тексту в коді. Якщо шматок вийшов з одного точного
-    /// сегмента -- самі ці байти, інакше від початку першого вузла до кінця
+    /// сегмента, це самі ці байти, інакше від початку першого вузла до кінця
     /// останнього.
     pub fn loc(&self, range: Range<usize>) -> Option<Loc> {
         if range.is_empty() {
@@ -238,13 +238,13 @@ mod tests {
         t.push_mapped("–", 0, dash..dash + 2);
         t.push_exact(" кінець.", 0, dash + 2);
         let end = t.as_str().len();
-        // Крапка в кінці -- точний сегмент
+        // Крапка в кінці є точним сегментом
         assert_eq!(
             t.exact_loc(end - 1..end).unwrap().range,
             code.len() - 1..code.len()
         );
         assert_eq!(t.after(end).unwrap().range, code.len()..code.len());
-        // Тире -- вузол цілком, без точного виправлення
+        // Тире відповідає вузлу цілком, без точного виправлення
         let at = t.as_str().find('–').unwrap();
         assert!(t.exact_loc(at..at + '–'.len_utf8()).is_none());
         assert_eq!(

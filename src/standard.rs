@@ -328,8 +328,8 @@ pub fn clause(id: &str) -> Option<&'static str> {
     CLAUSES.iter().find(|(c, _)| *c == id).map(|(_, t)| *t)
 }
 
-/// Пункти з переліку правила: «7.1.20, 7.1.21», «7.4.1–7.4.5» (діапазон —
-/// усі відомі пункти між межами).
+/// Пункти з переліку правила: «7.1.20, 7.1.21», «7.4.1–7.4.5» (діапазон
+/// охоплює всі відомі пункти між межами).
 pub fn clauses_of(spec: &str) -> Vec<(&'static str, &'static str)> {
     let mut out = Vec::new();
     for part in spec.split(',').map(str::trim) {
