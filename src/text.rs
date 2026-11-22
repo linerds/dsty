@@ -214,6 +214,29 @@ pub fn tail(s: &str) -> String {
     }
 }
 
+/// Довжина в пунктах як міліметри: «25 мм», «12,5 мм».
+pub fn mm(pt: f64) -> String {
+    let v = pt / crate::eval::MM;
+    if (v - v.round()).abs() < 0.05 {
+        format!("{} мм", v.round())
+    } else {
+        format!("{v:.1} мм").replace('.', ",")
+    }
+}
+
+/// Число з комою, до двох знаків: «1,5», «14».
+pub fn fmt_num(v: f64) -> String {
+    let s = format!("{v:.2}");
+    s.trim_end_matches('0')
+        .trim_end_matches('.')
+        .replace('.', ",")
+}
+
+/// Кегль чи довжина в пунктах: «12,5 pt».
+pub fn fmt_pt(v: f64) -> String {
+    fmt_num(v) + " pt"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

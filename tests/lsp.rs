@@ -153,12 +153,8 @@ fn diagnostics_and_quick_fixes() {
         diags[0]["range"]["start"],
         json!({ "line": 1, "character": 2 })
     );
-    assert!(
-        diags[0]["codeDescription"]["href"]
-            .as_str()
-            .unwrap()
-            .contains("lint.md#")
-    );
+    // Посилань на документацію будь-якого шаблону немає
+    assert!(diags[0].get("codeDescription").is_none());
 
     let actions = client.request(
         "textDocument/codeAction",
@@ -223,7 +219,8 @@ fn full_check_on_open() {
     std::fs::create_dir_all(&dir).unwrap();
     let dir: PathBuf = dir.canonicalize().unwrap();
     let main = dir.join("main.typ");
-    let text = "#set page(paper: \"a5\")\nТекст документа.\n";
+    // Номер на титульному аркуші: його бачить лише повна перевірка
+    let text = "#set page(numbering: \"1\")\nТекст документа.\n";
     std::fs::write(&main, text).unwrap();
     let uri = format!("file://{}", main.display());
 
@@ -245,12 +242,12 @@ fn full_check_on_open() {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let diags = client.wait_diagnostics(&uri);
-        if let Some(d) = diags.iter().find(|d| d["code"] == "page-size") {
+        if let Some(d) = diags.iter().find(|d| d["code"] == "page-number") {
             // Зауваження стоїть на `set page`, а не на 1:1
             assert_eq!(d["range"]["start"], json!({ "line": 0, "character": 1 }));
             break;
         }
-        assert!(Instant::now() < deadline, "немає page-size: {diags:#?}");
+        assert!(Instant::now() < deadline, "немає page-number: {diags:#?}");
     }
 
     client.request("shutdown", json!(null));
@@ -548,7 +545,8 @@ fn full_check_command_with_progress() {
     std::fs::create_dir_all(&dir).unwrap();
     let dir: PathBuf = dir.canonicalize().unwrap();
     let main = dir.join("main.typ");
-    let text = "#set page(paper: \"a5\")\nТекст документа.\n";
+    // Номер на титульному аркуші: його бачить лише повна перевірка
+    let text = "#set page(numbering: \"1\")\nТекст документа.\n";
     std::fs::write(&main, text).unwrap();
     let uri = format!("file://{}", main.display());
 
@@ -583,10 +581,10 @@ fn full_check_command_with_progress() {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let diags = client.wait_diagnostics(&uri);
-        if diags.iter().any(|d| d["code"] == "page-size") {
+        if diags.iter().any(|d| d["code"] == "page-number") {
             break;
         }
-        assert!(Instant::now() < deadline, "немає page-size: {diags:#?}");
+        assert!(Instant::now() < deadline, "немає page-number: {diags:#?}");
     }
 
     client.request("shutdown", json!(null));

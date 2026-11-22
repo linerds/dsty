@@ -34,16 +34,15 @@ use lsp_types::request::{
 };
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
-    CodeActionProviderCapability, CodeDescription, Command, CompletionItem, CompletionItemKind,
-    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic,
-    DiagnosticRelatedInformation, DiagnosticSeverity, DiagnosticTag, Documentation,
-    ExecuteCommandOptions, ExecuteCommandParams, Hover, HoverContents, HoverParams,
-    HoverProviderCapability, InitializeParams, Location, LogMessageParams, MarkupContent,
-    MarkupKind, MessageType, NumberOrString, Position, ProgressParams, ProgressParamsValue,
-    PublishDiagnosticsParams, Range, SaveOptions, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions, TextEdit, Url, WorkDoneProgress, WorkDoneProgressBegin,
-    WorkDoneProgressCreateParams, WorkDoneProgressEnd, WorkspaceEdit,
+    CodeActionProviderCapability, Command, CompletionItem, CompletionItemKind, CompletionOptions,
+    CompletionParams, CompletionResponse, Diagnostic, DiagnosticRelatedInformation,
+    DiagnosticSeverity, DiagnosticTag, Documentation, ExecuteCommandOptions, ExecuteCommandParams,
+    Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeParams, Location,
+    LogMessageParams, MarkupContent, MarkupKind, MessageType, NumberOrString, Position,
+    ProgressParams, ProgressParamsValue, PublishDiagnosticsParams, Range, SaveOptions,
+    ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Url, WorkDoneProgress,
+    WorkDoneProgressBegin, WorkDoneProgressCreateParams, WorkDoneProgressEnd, WorkspaceEdit,
 };
 
 use crate::config::Config;
@@ -1387,22 +1386,12 @@ fn to_lsp(diag: &lint::Diagnostic) -> Diagnostic {
         range: Range::new(pos(diag.start), pos(diag.end)),
         severity: Some(severity(diag.severity)),
         code: (!diag.rule.is_empty()).then(|| NumberOrString::String(diag.rule.into())),
-        code_description: docs_url(diag.rule).map(|href| CodeDescription { href }),
         source: Some("dsty".into()),
         message: diag.message(),
         tags: diag.unnecessary.then(|| vec![DiagnosticTag::UNNECESSARY]),
         related_information: (!related.is_empty()).then_some(related),
         ..Default::default()
     }
-}
-
-/// Розділ `docs/lint.md` пакунка nure з описом правила.
-fn docs_url(rule: &str) -> Option<Url> {
-    let section = rules::find(rule)?.docs_section()?;
-    Url::parse(&format!(
-        "https://github.com/beauloxe/typst-nure-template/blob/main/docs/lint.md#{section}"
-    ))
-    .ok()
 }
 
 fn log(sender: &Sender<Message>, typ: MessageType, message: String) {
@@ -1464,18 +1453,6 @@ fn is_typst(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn docs_links() {
-        let url = docs_url("list-punct").unwrap();
-        assert!(
-            url.as_str()
-                .ends_with("lint.md#%D0%BF%D0%B5%D1%80%D0%B5%D0%BB%D1%96%D0%BA%D0%B8")
-        );
-        assert!(docs_url("keywords-count").is_some());
-        assert!(docs_url("ignore-unused").is_none());
-        assert!(docs_url("page-size").is_none());
-    }
 
     #[test]
     fn main_is_guessed_upwards() {

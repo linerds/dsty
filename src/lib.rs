@@ -4,6 +4,7 @@
 //! LSP-сервер ([`lsp`]).
 
 pub mod config;
+pub mod eval;
 pub mod full;
 pub mod lint;
 pub mod lsp;
@@ -11,4 +12,5 @@ pub mod model;
 pub mod render;
 pub mod rules;
 pub mod standard;
+pub mod style;
 pub mod text;

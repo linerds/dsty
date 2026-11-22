@@ -8,8 +8,10 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use crate::eval::MM;
 use crate::model::{Block, Doc, FigureKind, Heading, Label};
-use crate::text::{Case, Loc, Text, ends_with_period, first_case, quote, tail};
+use crate::style::Origin;
+use crate::text::{Case, Loc, Text, ends_with_period, first_case, fmt_num, mm, quote, tail};
 
 /// Рівень зауваження в редакторі.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
@@ -45,6 +47,11 @@ pub struct Rule {
     /// Проби повної перевірки, потрібні правилу ([`probe`]): з них збирається
     /// обгортка. Буває й у статичного правила з повною частиною.
     pub probes: u8,
+    /// Статичне правило з повною частиною: без компіляції бачить не все.
+    pub partial: bool,
+    /// Статична й повна частини перевіряють різне (основний текст і
+    /// заголовки), тож зауваження в одному рядку не дублюють одне одне.
+    pub split: bool,
     /// Рекомендація стандарту («рекомендовано»), а не вимога: у редакторі це
     /// інформація, а не попередження.
     pub advice: bool,
@@ -77,6 +84,8 @@ const fn rule(code: &'static str, clause: &'static str, desc: &'static str) -> R
         optional: false,
         full: false,
         probes: 0,
+        partial: false,
+        split: false,
         advice: false,
         severity: Severity::Warning,
     }
@@ -99,6 +108,14 @@ impl Rule {
     /// Статичне правило, що має й повну частину.
     const fn probes(mut self, probes: u8) -> Self {
         self.probes = probes;
+        self.partial = true;
+        self
+    }
+
+    /// Статичне правило, повна частина якого перевіряє інше ([`Rule::split`]).
+    const fn split(mut self, probes: u8) -> Self {
+        self = self.probes(probes);
+        self.split = true;
         self
     }
 
@@ -152,38 +169,6 @@ impl Rule {
             marks.push("рекомендація стандарту");
         }
         marks
-    }
-
-    /// Розділ `docs/lint.md` пакунка nure з описом правила: для правил, які
-    /// має й typst-версія лінтера в пакунку (інші описує підказка dsty).
-    pub fn docs_section(&self) -> Option<&'static str> {
-        Some(match self.code {
-            "structure-order" | "structure-name" | "bibliography-missing" | "abbrev-order" => {
-                "структура"
-            }
-            "heading-period" | "heading-case" | "heading-numbered" | "heading-single" => {
-                "заголовки"
-            }
-            "figure-unreferenced"
-            | "table-unreferenced"
-            | "figure-before-ref"
-            | "figure-far-from-ref"
-            | "caption-case"
-            | "table-no-header"
-            | "table-header-case"
-            | "table-header-period" => "рисунки-й-таблиці",
-            "list-case" | "list-punct" | "list-colon" => "переліки",
-            "formula-where" | "unit-space" | "unit-range" | "unit-dimensions" => {
-                "формули-й-числові-значення"
-            }
-            "footnote-count"
-            | "keywords-count"
-            | "appendix-unreferenced"
-            | "appendix-order"
-            | "appendix-case"
-            | "abstract-length" => "виноски-реферат-додатки",
-            _ => return None,
-        })
     }
 }
 
@@ -539,14 +524,12 @@ pub const RULES: &[Rule] = &[
         "page-size",
         "7.1.6",
         "Звіт друкують на аркушах формату А4 (за потреби — А3)",
-    )
-    .full(0),
+    ),
     rule(
         "page-margins",
         "7.1.11",
         "Береги: верхній і нижній — не менше 20 мм, лівий — 25 мм, правий — 10 мм",
     )
-    .full(0)
     .optional()
     .advice(),
     rule(
@@ -560,7 +543,7 @@ pub const RULES: &[Rule] = &[
         "7.1.5",
         "Звіт друкують шрифтом Times New Roman",
     )
-    .full(TEXT),
+    .split(TEXT),
     rule(
         "font-missing",
         "7.1.5",
@@ -573,7 +556,7 @@ pub const RULES: &[Rule] = &[
         "7.1.5, 7.9.6",
         "Основний текст і заголовки — кеглем 14, виноски — 12",
     )
-    .full(TEXT | PAR),
+    .split(TEXT | PAR),
     rule(
         "font-style",
         "7.1.5",
@@ -586,13 +569,12 @@ pub const RULES: &[Rule] = &[
         "7.1.5, 7.9.6",
         "Текст друкують через 1,5–2 міжрядкові інтервали, виноски — через один",
     )
-    .full(PAR),
+    .split(PAR),
     rule(
         "par-indent",
         "7.1.22",
         "Абзацний відступ однаковий у всьому тексті й дорівнює п'яти знакам",
-    )
-    .full(PAR),
+    ),
     rule(
         "note-size",
         "7.8.3",
@@ -934,6 +916,7 @@ pub fn run(doc: &Doc, active: &dyn Fn(&str) -> bool) -> Vec<Found> {
     checker.refs();
     checker.citations();
     checker.formulas();
+    checker.styles();
     checker.out
 }
 
@@ -2333,4 +2316,272 @@ fn last_char_fix(text: &Text, title: &str, with: &str) -> Option<FixDraft> {
         title: title.into(),
         edits: vec![(loc, with.into())],
     })
+}
+
+/// Крок рядків через `leading` (в em) для шрифту з висотою великих літер
+/// `cap`: typst ставить рядки на відстані `leading` + висота великої літери.
+fn spacing(leading: f64, cap: f64) -> f64 {
+    (leading + cap) / 1.15
+}
+
+/// Зауваження до налаштування, поки абзаци рахуються: (правило, місце,
+/// повідомлення, виправлення, абзаців із цим налаштуванням, з-поміж скількох).
+type Pending = (&'static str, Loc, String, Vec<FixDraft>, usize, usize);
+
+/// Налаштування тексту й сторінки з коду (статична частина правил кегля,
+/// шрифту, інтервалу, відступу й формату; решту бачить повна перевірка).
+impl Checker<'_> {
+    fn styles(&mut self) {
+        let doc = self.doc;
+        // Документ без жодного налаштування тексту чи сторінки й без шаблону
+        // найімовірніше є фрагментом (розділ, відкритий окремо): типові
+        // значення typst до нього не стосуються
+        let configured = doc.template.is_some()
+            || doc.sets.iter().any(|s| {
+                s.selector.is_none() && matches!(s.target.as_str(), "page" | "text" | "par")
+            });
+        let mut all = Vec::new();
+        let mut body = Vec::new();
+        // Абзаци з абзацним відступом: «де …» і примітки друкують без нього
+        let mut indented = Vec::new();
+        // Перші абзаци після заголовка, рисунка, переліку
+        let mut after_block = Vec::new();
+        let mut started = false;
+        let mut prev_par = false;
+        for block in &doc.blocks {
+            match block {
+                Block::Heading(_) => started = true,
+                Block::Par(p) => {
+                    all.push(p.style);
+                    // Основний текст: після першого заголовка (не титульний аркуш)
+                    let head = p.text.trimmed().to_lowercase();
+                    let unindented =
+                        head == "де" || head.starts_with("де ") || head.starts_with("примітк");
+                    if started {
+                        body.push(p.style);
+                        if !unindented {
+                            indented.push(p.style);
+                            if !prev_par {
+                                after_block.push(p.style);
+                            }
+                        }
+                    }
+                }
+                Block::Keywords { .. } => continue,
+                _ => {}
+            }
+            prev_par = matches!(block, Block::Par(_));
+        }
+        // Скільки абзаців основного тексту з кожними налаштуваннями
+        let total = body.len();
+        let mut counts: std::collections::HashMap<usize, usize> = Default::default();
+        for &i in &body {
+            *counts.entry(i).or_default() += 1;
+        }
+        let mut indent_counts: std::collections::HashMap<usize, usize> = Default::default();
+        for &i in &indented {
+            *indent_counts.entry(i).or_default() += 1;
+        }
+        let indented_total = indented.len();
+        for list in [&mut all, &mut body, &mut indented, &mut after_block] {
+            list.sort_unstable();
+            list.dedup();
+        }
+        // Зауваження за місцем налаштування: (правило, місце, повідомлення,
+        // виправлення, абзаців, з-поміж скількох)
+        let mut pending: Vec<Pending> = Vec::new();
+        let mut report = |(count, total): (usize, usize),
+                          code: &'static str,
+                          origin: Option<&Origin>,
+                          place: (&str, &[&str]),
+                          msg: String,
+                          fix: Option<(&str, &str)>| {
+            if origin.is_none() && !configured {
+                return;
+            }
+            let loc = origin.map_or_else(|| doc.setting(place.0, place.1), |o| o.loc.clone());
+            if let Some(p) = pending
+                .iter_mut()
+                .find(|p| p.0 == code && p.1 == loc && p.2.starts_with(msg.as_str()))
+            {
+                p.4 += count;
+                return;
+            }
+            let msg = match origin {
+                None => format!("{msg} (типове значення typst)"),
+                Some(Origin {
+                    template: Some(t), ..
+                }) => format!("{msg} (так задає шаблон, {t})"),
+                Some(_) => msg,
+            };
+            let fixes = match (origin.and_then(|o| o.value.clone()), fix) {
+                (Some(loc), Some((title, text))) => vec![FixDraft {
+                    title: title.into(),
+                    edits: vec![(loc, text.into())],
+                }],
+                _ => Vec::new(),
+            };
+            pending.push((code, loc, msg, fixes, count, total));
+        };
+
+        for &i in &body {
+            let style = &doc.styles[i];
+            let n = (counts[&i], total);
+            if let Some(size) = style.size_pt()
+                && (size - 14.0).abs() > 0.05
+            {
+                report(
+                    n,
+                    "font-size",
+                    style.size.origin(),
+                    ("text", &["size"]),
+                    format!(
+                        "основний текст набрано кеглем {}, має бути 14",
+                        fmt_num(size)
+                    ),
+                    Some(("Замінити на 14pt", "14pt")),
+                );
+            }
+            if let Some(font) = style.font.known()
+                && !font.eq_ignore_ascii_case("times new roman")
+            {
+                report(
+                    n,
+                    "font-family",
+                    style.font.origin(),
+                    ("text", &["font"]),
+                    format!("основний текст набрано шрифтом «{font}», має бути Times New Roman"),
+                    Some(("Замінити на Times New Roman", "\"Times New Roman\"")),
+                );
+            }
+            // Інтервал: висота великої літери в шрифтах 0,6–0,75 em, тож
+            // зауваження лише там, де інтервал поза межами за будь-якої з них
+            if let Some(em) = style.leading_em()
+                && (spacing(em, 0.75) < 1.35 || spacing(em, 0.6) > 2.2)
+            {
+                report(
+                    n,
+                    "line-spacing",
+                    style.leading.origin(),
+                    ("par", &["leading"]),
+                    format!(
+                        "основний текст набрано приблизно через {} інтервалу (leading {} em), має бути 1,5–2",
+                        fmt_num(spacing(em, 0.662)),
+                        fmt_num(em)
+                    ),
+                    None,
+                );
+            }
+        }
+
+        for &i in &indented {
+            let style = &doc.styles[i];
+            let n = (indent_counts[&i], indented_total);
+            if let Some(d) = style.indent_pt() {
+                let msg = if d.abs() < 0.01 {
+                    Some(
+                        "в абзацах немає абзацного відступу, має бути п'ять знаків (≈ 12,5 мм)"
+                            .into(),
+                    )
+                } else if !(10.0 * MM - 0.3..=15.0 * MM + 0.3).contains(&d) {
+                    Some(format!(
+                        "абзацний відступ {}, має дорівнювати п'яти знакам (≈ 12,5 мм)",
+                        mm(d)
+                    ))
+                } else {
+                    None
+                };
+                if let Some(msg) = msg {
+                    report(
+                        n,
+                        "par-indent",
+                        style.indent.origin(),
+                        ("par", &["first-line-indent"]),
+                        msg,
+                        None,
+                    );
+                }
+            }
+        }
+        // За `all: false` typst не відступає перший абзац після заголовка,
+        // рисунка, переліку
+        for &i in &after_block {
+            let style = &doc.styles[i];
+            if style.indent_pt().is_some_and(|d| d > 0.01) && !style.indent_all {
+                report(
+                    (0, 0),
+                    "par-indent",
+                    style.indent.origin(),
+                    ("par", &["first-line-indent"]),
+                    "перший абзац після заголовка, рисунка чи переліку без відступу: задайте `first-line-indent: (amount: …, all: true)`".into(),
+                    None,
+                );
+            }
+        }
+
+        for &i in &all {
+            let style = &doc.styles[i];
+            let n = (0, 0);
+            if let Some(page) = style.page.known() {
+                let near = |a: f64, b: f64| (a - b).abs() < 1.5;
+                let msg = match (page.w, page.h) {
+                    (Some(w), Some(h)) => {
+                        let (s, l) = (w.min(h), w.max(h));
+                        let a4 = near(s, 210.0 * MM) && near(l, 297.0 * MM);
+                        let a3 = near(s, 297.0 * MM) && near(l, 420.0 * MM);
+                        (!a4 && !a3).then(|| {
+                            format!(
+                                "формат {} × {}, має бути А4 (210 мм × 297 мм)",
+                                mm(w),
+                                mm(h)
+                            )
+                        })
+                    }
+                    _ => page
+                        .name
+                        .as_ref()
+                        .map(|n| format!("формат «{n}», має бути А4 (210 мм × 297 мм)")),
+                };
+                if let Some(msg) = msg {
+                    report(
+                        n,
+                        "page-size",
+                        style.page.origin(),
+                        ("page", &["paper", "width", "height", "flipped"]),
+                        msg,
+                        None,
+                    );
+                }
+            }
+            if let Some(m) = style.margins_pt() {
+                let [(t, _), (r, _), (b, _), (l, _)] = m;
+                let min = [20.0, 10.0, 20.0, 25.0];
+                if let Some(bad) = (0..4).find(|&k| m[k].0 < min[k] * MM - 0.5) {
+                    report(
+                        n,
+                        "page-margins",
+                        m[bad].1,
+                        ("page", &["margin"]),
+                        format!(
+                            "береги верхній {}, нижній {}, лівий {}, правий {}; рекомендовано не менше 20, 20, 25 і 10 мм",
+                            mm(t),
+                            mm(b),
+                            mm(l),
+                            mm(r)
+                        ),
+                        None,
+                    );
+                }
+            }
+        }
+        for (code, loc, msg, fixes, count, total) in pending {
+            // Налаштування діє не на весь основний текст (місцеве `set`)
+            let msg = if count > 0 && count < total {
+                format!("{msg} ({count} абзаців з {total})")
+            } else {
+                msg
+            };
+            self.add(code, Some(loc), msg, fixes);
+        }
+    }
 }

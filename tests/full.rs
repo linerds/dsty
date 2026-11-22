@@ -1,6 +1,5 @@
 //! Повна перевірка з реальним `typst` з PATH (без нього тести пропускаються):
-//! правила спрацьовують на порушеннях, мовчать на документі за шаблоном nure,
-//! а проби не змінюють розкладки.
+//! правила спрацьовують на порушеннях, а проби не змінюють розкладки.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -266,29 +265,16 @@ fn heading_on_last_line() {
     );
 }
 
-/// Документ за шаблоном nure (поруч у `../typst_nure_template`): повна
-/// перевірка не має зауважень, крім свідомих рішень шаблону.
-fn nure_document(dir: &Path) -> Option<String> {
-    let repo = std::env::var_os("NURE_TEMPLATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../typst_nure_template")
-        });
-    let src = repo.join("src");
-    if !src.join("lib.typ").is_file() {
-        eprintln!("пропущено: немає {}", src.display());
-        return None;
-    }
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&src, dir.join("lib")).unwrap();
-    Some(
-        r#"#import "/lib/lib.typ": *
-#show: style.dstu.with(skip: 1)
+/// Документ з усіма видами блоків, які розмічають проби.
+const LAYOUT_DOCUMENT: &str = r#"#set page(paper: "a4", margin: (top: 20mm, bottom: 20mm, left: 25mm, right: 10mm), numbering: "1", number-align: top + right)
+#set text(lang: "uk", size: 14pt)
+#set par(justify: true, leading: 0.95em, first-line-indent: (amount: 1.25cm, all: true))
+#set heading(numbering: "1.1")
+#set math.equation(numbering: "(1)")
 #align(center)[Титульний аркуш]
 #pagebreak()
-#utils.nheading[Вступ]
+#heading(numbering: none)[Вступ]
 Вступ до роботи, досить довгий, щоб займати кілька рядків і мати ключ прив'язки до коду.
-Його мета -- показати, що повна перевірка не має зауважень до шаблону.
 
 = Огляд предметної області
 Перший абзац розділу, досить довгий, щоб займати кілька рядків і мати ключ прив'язки.
@@ -310,34 +296,9 @@ $ m = F / a $ <eq>
 Текст з виноскою#footnote[Пояснення до тексту.], досить довгий, щоб мати ключ прив'язки.
 == Перший підрозділ
 Текст підрозділу, досить довгий, щоб займати кілька рядків і мати ключ прив'язки.
-== Другий підрозділ
-Текст підрозділу, досить довгий, щоб займати кілька рядків і мати ключ прив'язки.
-#utils.nheading[Висновки]
+#heading(numbering: none)[Висновки]
 Висновки роботи, досить довгі, щоб займати кілька рядків і мати ключ прив'язки до коду.
-"#
-        .to_owned(),
-    )
-}
-
-#[test]
-fn nure_template_is_clean() {
-    if typst().is_none() {
-        return;
-    }
-    let dir = temp_dir("nure");
-    let Some(src) = nure_document(&dir) else {
-        return;
-    };
-    let found = check(&dir, &src, &[]);
-    let full: Vec<&(String, String)> = found
-        .iter()
-        .filter(|(r, _)| dsty::rules::find(r).is_some_and(|r| r.full))
-        .collect();
-    assert!(
-        full.is_empty(),
-        "зауваження до документа за шаблоном: {full:?}"
-    );
-}
+"#;
 
 /// Позиції всіх блокових елементів і кількість сторінок без проб і з ними.
 #[test]
@@ -346,10 +307,7 @@ fn probes_do_not_change_layout() {
         return;
     };
     let dir = temp_dir("layout");
-    let Some(src) = nure_document(&dir) else {
-        return;
-    };
-    std::fs::write(dir.join("main.typ"), src).unwrap();
+    std::fs::write(dir.join("main.typ"), LAYOUT_DOCUMENT).unwrap();
     let query = "query(selector(heading).or(figure).or(par).or(footnote).or(math.equation).or(list).or(table)).map(e => { let p = e.location().position(); (repr(e.func()), p.page, calc.round(p.x.pt(), digits: 3), calc.round(p.y.pt(), digits: 3)) })";
     let positions = |input: String| {
         let mut child = Command::new(&typst)

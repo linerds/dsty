@@ -3,16 +3,24 @@
 //! Від main-файлу обходимо синтаксичне дерево (`typst-syntax`), заходимо в
 //! `#include` локальних файлів і збираємо в порядку документа те, що перевіряє
 //! стандарт: заголовки, рисунки й таблиці, переліки, абзаци, формули,
-//! посилання. Пакунки (`@preview/…`) не читаються: обгортки шаблонів
-//! (`fig`, `tab`, `bib`, `appendices`, `nheading`…) розпізнаються за назвою.
+//! посилання. Виклики функцій з коду (шаблонів, пакунків, самого документа)
+//! обчислює [`crate::eval`]: які вбудовані елементи вони створюють
+//! (`heading`, `figure`, `table`, `bibliography`, `outline`), з якими
+//! налаштуваннями ([`crate::style`], нумерація, додатки) і де стоїть вміст
+//! документа. Назви обгорток значення не мають: функцію, якої не обчислити,
+//! модель обходить як контейнер, не вгадуючи, що вона робить.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use typst_syntax::ast::{self, AstNode, Expr};
-use typst_syntax::{FileId, RootedPath, Source, SyntaxNode, VirtualPath, VirtualRoot};
+use typst_syntax::{FileId, LinkedNode, RootedPath, Source, SyntaxNode, VirtualPath, VirtualRoot};
 
+use std::rc::Rc;
+
+use crate::eval::{self, Callee, Effect, Elem, Evaluator, Item as Part, SetArg, SetEffect, Value};
+use crate::style::{Origin, Style};
 use crate::text::{Loc, Text};
 
 /// Спільний id для всіх файлів: span шукаємо лише в його власному дереві,
@@ -56,6 +64,8 @@ pub struct Doc {
     /// Власне show-правило `ref` у коді документа: як друкуються посилання,
     /// з коду не видно.
     pub custom_ref: bool,
+    /// Налаштування тексту й сторінки ([`Par::style`]); перше — типові typst.
+    pub styles: Vec<Style>,
 }
 
 /// Посилання на мітку в тексті.
@@ -112,11 +122,12 @@ impl SetRule {
 
 impl Doc {
     /// Місце налаштування `target` з аргументом `arg` (останнє в документі),
-    /// інакше рядок шаблону, інакше перший непорожній рядок main-файлу.
-    /// Show-set-правила (`show heading: set text(…)`) діють лише в елементі,
-    /// тож тут не враховуються.
+    /// інакше будь-якого `set target(…)`, інакше рядок шаблону, інакше перший
+    /// непорожній рядок main-файлу. Show-set-правила (`show heading: set
+    /// text(…)`) діють лише в елементі, тож тут не враховуються.
     pub fn setting(&self, target: &str, args: &[&str]) -> Loc {
         self.find_set(None, target, args)
+            .or_else(|| self.find_set(None, target, &[]))
             .unwrap_or_else(|| self.anchor())
     }
 
@@ -281,6 +292,8 @@ pub struct Par {
     /// Абзац іде одразу після виокремленої формули.
     pub after_equation: bool,
     pub section: Section,
+    /// Налаштування, що діють на абзац: індекс у [`Doc::styles`].
+    pub style: usize,
 }
 
 /// Будує модель документа. `load` читає файл (відкритий буфер чи диск).
@@ -289,20 +302,25 @@ pub fn build(root: &Path, main: &Path, load: &dyn Fn(&Path) -> Option<String>) -
     let mut walker = Walker {
         root: root.to_path_buf(),
         load,
-        doc: Doc::default(),
+        ev: Evaluator::new(root, load),
+        para_style: 0,
+        doc: Doc {
+            styles: vec![Style::default()],
+            ..Doc::default()
+        },
         tick: 0,
         including: vec![main.to_path_buf()],
         para: Text::default(),
         last: Last::None,
-        deferred: Vec::new(),
         section: None,
+        template_text: String::new(),
+        walked: 0,
     };
     let file = walker.add_file(main.to_path_buf(), text);
     let cx = walker.cx(file);
     let mut scope = Scope::default();
     walker.markup(&cx, cx.root().cast().unwrap(), &mut scope);
     walker.flush();
-    walker.run_deferred();
     Some(walker.doc)
 }
 
@@ -363,6 +381,8 @@ struct Scope {
     /// Заголовки нумеруються: `set heading(numbering: …)` чи застосований шаблон.
     numbered: bool,
     appendix: bool,
+    /// Налаштування тексту й сторінки: індекс у [`Doc::styles`].
+    style: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -371,13 +391,6 @@ enum Last {
     Par(usize),
     Equation,
     Other,
-}
-
-/// Вміст рецепта шаблону, який друкується в кінці документа
-/// (`#show: coursework.with(bib-path: …, appendices: […])`).
-enum Deferred {
-    Bibliography(Loc),
-    Appendices(usize, SyntaxNode),
 }
 
 struct Cx {
@@ -408,23 +421,29 @@ impl Cx {
 struct Walker<'a> {
     root: PathBuf,
     load: &'a dyn Fn(&Path) -> Option<String>,
+    ev: Evaluator<'a>,
+    /// Налаштування на початку абзацу, що набирається.
+    para_style: usize,
     doc: Doc,
     tick: usize,
     including: Vec<PathBuf>,
     /// Абзац, що набирається.
     para: Text,
     last: Last,
-    deferred: Vec<Deferred>,
     /// Структурний елемент, у якому стоїмо, і рівень його заголовка.
     section: Option<(&'static str, usize)>,
+    /// Текст, який друкує шаблон (не документ), у поточному абзаці: окремий
+    /// рядок «РЕФЕРАТ» чи «ЗМІСТ» стає заголовком структурного елемента.
+    template_text: String,
+    /// Скільки разів обійдено вміст документа з аргументів обгорток.
+    walked: usize,
 }
 
 impl Walker<'_> {
     fn add_file(&mut self, path: PathBuf, text: String) -> usize {
-        self.doc.files.push(SourceFile {
-            path,
-            source: parse(text),
-        });
+        let source = parse(text);
+        self.ev.adopt(&path, source.clone());
+        self.doc.files.push(SourceFile { path, source });
         self.doc.files.len() - 1
     }
 
@@ -461,6 +480,7 @@ impl Walker<'_> {
             text,
             after_equation,
             section: self.section(),
+            style: self.para_style,
         }));
     }
 
@@ -514,14 +534,26 @@ impl Walker<'_> {
 
     fn markup(&mut self, cx: &Cx, markup: ast::Markup, scope: &mut Scope) {
         let exprs: Vec<Expr> = markup.exprs().collect();
+        self.markup_exprs(cx, &exprs, scope);
+    }
+
+    fn markup_exprs(&mut self, cx: &Cx, exprs: &[Expr], scope: &mut Scope) {
         let mut i = 0;
         while i < exprs.len() {
             let expr = exprs[i];
+            if self.para.trimmed().is_empty() {
+                self.para_style = scope.style;
+            }
             match expr {
+                // `#show: шаблон` діє на решту розмітки: шаблон сам вирішує, де її вивести
+                Expr::ShowRule(show) if show.selector().is_none() => {
+                    self.show_rule(cx, show, scope, &exprs[i + 1..], true);
+                    return;
+                }
                 Expr::Parbreak(_) => self.flush(),
                 Expr::Heading(h) => {
                     self.flush();
-                    self.markup_heading(cx, h, *scope, label_after(&exprs, i));
+                    self.markup_heading(cx, h, *scope, label_after(exprs, i));
                 }
                 Expr::ListItem(_) | Expr::EnumItem(_) => {
                     // Позиції одного переліку: того самого виду, між ними лише пробіли
@@ -556,7 +588,7 @@ impl Walker<'_> {
                 Expr::Equation(eq) if eq.block() => {
                     self.flush();
                     let follows = self.last == Last::Equation;
-                    let label = label_after(&exprs, i);
+                    let label = label_after(exprs, i);
                     self.emit(Block::Equation {
                         loc: cx.loc(expr.to_untyped()),
                         label,
@@ -598,7 +630,7 @@ impl Walker<'_> {
                     i = last + 1;
                     continue;
                 }
-                Expr::FuncCall(call) => self.call(cx, call, scope, label_after(&exprs, i), true),
+                Expr::FuncCall(call) => self.call(cx, call, scope, label_after(exprs, i), true),
                 _ if is_inline(expr) => {
                     let mut text = std::mem::take(&mut self.para);
                     self.inline(cx, expr, &mut text);
@@ -610,7 +642,20 @@ impl Walker<'_> {
         }
     }
 
-    /// Вираз у режимі коду (тіло `#{…}`, `#if`, аргумент `appendices`).
+    /// Вирази блоку коду: `#show: шаблон` діє на решту блоку.
+    fn code_exprs(&mut self, cx: &Cx, exprs: &[Expr], scope: &mut Scope) {
+        for (i, &e) in exprs.iter().enumerate() {
+            if let Expr::ShowRule(show) = e
+                && show.selector().is_none()
+            {
+                self.show_rule(cx, show, scope, &exprs[i + 1..], false);
+                return;
+            }
+            self.code_expr(cx, e, scope);
+        }
+    }
+
+    /// Вираз у режимі коду (тіло `#{…}`, `#if`, вміст з аргументів обгорток).
     fn code_expr(&mut self, cx: &Cx, expr: Expr, scope: &mut Scope) {
         match expr {
             Expr::FuncCall(call) => self.call(cx, call, scope, None, false),
@@ -620,9 +665,8 @@ impl Walker<'_> {
             }
             Expr::CodeBlock(block) => {
                 let mut inner = *scope;
-                for e in block.body().exprs() {
-                    self.code_expr(cx, e, &mut inner);
-                }
+                let exprs: Vec<Expr> = block.body().exprs().collect();
+                self.code_exprs(cx, &exprs, &mut inner);
             }
             Expr::Parenthesized(p) => self.code_expr(cx, p.expr(), scope),
             Expr::Array(array) => {
@@ -637,9 +681,19 @@ impl Walker<'_> {
                 if callee_path(set.target()).last() == Some(&"bibliography") {
                     self.bib(cx, set.args());
                 }
-                apply_set(set, scope);
+                let file = self.doc.files[cx.file].path.clone();
+                if let Some(effect) = self.ev.set_in(&file, set) {
+                    self.restyle(
+                        scope,
+                        Some(&[Effect::Set(effect)]),
+                        &cx.loc(set.to_untyped()),
+                    );
+                }
             }
-            Expr::ShowRule(show) => self.show_rule(cx, show, scope),
+            Expr::ShowRule(show) if show.selector().is_some() => {
+                self.show_selector(cx, show, scope)
+            }
+            Expr::ShowRule(show) => self.show_rule(cx, show, scope, &[], false),
             Expr::ModuleInclude(include) => {
                 self.flush();
                 self.include(cx, include, *scope);
@@ -747,7 +801,7 @@ impl Walker<'_> {
                     }
                     Expr::Parbreak(_) => text.push_mapped(" ", cx.file, cx.range(e.to_untyped())),
                     Expr::Equation(eq) if eq.block() => blocks.push(e),
-                    Expr::FuncCall(call) if is_block_call(call) => blocks.push(e),
+                    Expr::FuncCall(call) if self.is_block_call(cx, call) => blocks.push(e),
                     Expr::FuncCall(_) => self.inline(cx, e, &mut text),
                     _ if is_inline(e) => self.inline(cx, e, &mut text),
                     _ => blocks.push(e),
@@ -781,13 +835,6 @@ impl Walker<'_> {
     }
 
     // --- Текст абзацу ---------------------------------------------------------
-
-    /// Текст одного виразу (назва, клітинка).
-    fn text_of(&mut self, cx: &Cx, expr: Expr) -> Text {
-        let mut text = Text::default();
-        self.inline(cx, expr, &mut text);
-        text
-    }
 
     fn inline_markup(&mut self, cx: &Cx, markup: ast::Markup, out: &mut Text) {
         for e in markup.exprs() {
@@ -872,8 +919,9 @@ impl Walker<'_> {
 
     // --- Виклики функцій --------------------------------------------------------
 
-    /// Виклик у розмітці (`markup`) чи в коді: блокові елементи, обгортки
-    /// шаблонів, решта обробляється як вбудований текст.
+    /// Виклик у розмітці (`markup`) чи в коді: вбудовані елементи, функції з
+    /// коду (шаблону, пакунка, документа) обчислюються, невідомі
+    /// обробляються як контейнер чи текст.
     fn call(
         &mut self,
         cx: &Cx,
@@ -883,38 +931,292 @@ impl Walker<'_> {
         in_markup: bool,
     ) {
         self.keywords(cx, call.args());
-        let name = callee_name(call).unwrap_or_default();
-        let node = call.to_untyped();
+        let file = self.doc.files[cx.file].path.clone();
+        match self.ev.callee_in(&file, call) {
+            Callee::Builtin(name) => self.builtin_call(cx, call, &name, scope, label, in_markup),
+            Callee::User => {
+                let node = call.to_untyped();
+                let value = self.ev.eval_doc_in(&file, Expr::FuncCall(call));
+                let site = cx.loc(node);
+                let walked = self.walked;
+                let mut inner = *scope;
+                let mut rest = None;
+                self.items(
+                    cx,
+                    &value.items(),
+                    &mut inner,
+                    &site,
+                    label,
+                    &mut rest,
+                    in_markup,
+                );
+                self.flush_template(&site);
+                // Функцію не обчислити: її вміст однаково перевіряється, але
+                // налаштування для нього невідомі
+                if self.walked == walked && has_content_args(call) {
+                    let mut inner = *scope;
+                    self.restyle(&mut inner, None, &site);
+                    self.generic_call(cx, call, "", &mut inner, in_markup);
+                }
+            }
+            Callee::Unknown => self.generic_call(cx, call, "", scope, in_markup),
+        }
+    }
+
+    /// Вбудована функція документа.
+    fn builtin_call(
+        &mut self,
+        cx: &Cx,
+        call: ast::FuncCall,
+        name: &str,
+        scope: &mut Scope,
+        label: Option<Label>,
+        in_markup: bool,
+    ) {
         match name {
-            "heading" | "nheading" => {
+            // Елементи, які модель збирає: ті самі, що з обгорток, але з коду
+            // документа (виправлення на місці, `full:` переліку джерел)
+            "heading" | "figure" | "list" | "enum" | "bibliography" | "outline" => {
                 self.flush();
+                if name == "bibliography" {
+                    self.bib(cx, call.args());
+                }
+                let file = self.doc.files[cx.file].path.clone();
+                let value = self.ev.eval_doc_in(&file, Expr::FuncCall(call));
+                let site = cx.loc(call.to_untyped());
+                let mut label = label;
+                for item in value.items() {
+                    if let Part::Elem(e) = item {
+                        self.elem(cx, &e, scope, label.take(), &site, true);
+                    }
+                }
+            }
+            _ => self.generic_call(cx, call, name, scope, in_markup),
+        }
+    }
+
+    /// Виклик без особливого значення для моделі: контейнер (`align`, `block`,
+    /// невідома обгортка з абзацами) чи текст у рядку.
+    fn generic_call(
+        &mut self,
+        cx: &Cx,
+        call: ast::FuncCall,
+        name: &str,
+        scope: &mut Scope,
+        in_markup: bool,
+    ) {
+        if is_block_name(name) || !in_markup || self.has_blocks(cx, call) {
+            // Контейнер: його вміст складається з окремих абзаців
+            self.flush();
+            if matches!(name, "table" | "grid") {
+                let file = self.doc.files[cx.file].path.clone();
+                let value = self.ev.eval_doc_in(&file, Expr::FuncCall(call));
+                let site = cx.loc(call.to_untyped());
+                if let Some(table) = find_elem(&value, name) {
+                    self.elem_terms(cx, &table, &site);
+                }
+            }
+            let mut inner = *scope;
+            // `#text(size: 12pt)[…]`: налаштування для вмісту
+            if matches!(name, "text" | "par" | "page") {
+                let file = self.doc.files[cx.file].path.clone();
+                if let Some(effect) = self.ev.call_set_in(&file, call) {
+                    self.restyle(
+                        &mut inner,
+                        Some(&[Effect::Set(effect)]),
+                        &cx.loc(call.to_untyped()),
+                    );
+                }
+            }
+            for arg in content_args(call) {
+                self.code_expr(cx, arg, &mut inner);
+                self.flush();
+            }
+            // Проміжок чи розрив сторінки між формулами не відокремлює їх
+            // текстом (7.10.11)
+            let spacing = matches!(name, "v" | "pagebreak" | "colbreak");
+            if is_block_name(name) && !(spacing && self.last == Last::Equation) {
+                self.last = Last::Other;
+            }
+        } else {
+            let mut text = std::mem::take(&mut self.para);
+            self.inline_call(cx, call, &mut text);
+            self.para = text;
+        }
+    }
+
+    /// Чи дає виклик блок (заголовок, рисунок, контейнер), а не текст у рядку.
+    fn is_block_call(&mut self, cx: &Cx, call: ast::FuncCall) -> bool {
+        let file = self.doc.files[cx.file].path.clone();
+        match self.ev.callee_in(&file, call) {
+            Callee::Builtin(name) => {
+                is_block_name(&name) || matches!(name.as_str(), "heading" | "figure")
+            }
+            Callee::User => {
+                let value = self.ev.eval_doc_in(&file, Expr::FuncCall(call));
+                has_block(&value.items())
+            }
+            Callee::Unknown => false,
+        }
+    }
+
+    /// Чи є у вмісті виклику абзаци, заголовки чи переліки.
+    fn has_blocks(&mut self, cx: &Cx, call: ast::FuncCall) -> bool {
+        for arg in content_args(call) {
+            let Expr::ContentBlock(block) = arg else {
+                continue;
+            };
+            for e in block.body().exprs() {
+                let block = match e {
+                    Expr::Parbreak(_)
+                    | Expr::Heading(_)
+                    | Expr::ListItem(_)
+                    | Expr::EnumItem(_) => true,
+                    Expr::Equation(eq) => eq.block(),
+                    Expr::FuncCall(c) => self.is_block_call(cx, c),
+                    _ => false,
+                };
+                if block {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    // --- Вміст із шаблонів і обгорток -------------------------------------------
+
+    /// Вміст, який дала функція з коду: вміст документа (його код) обходиться
+    /// на своєму місці під налаштуваннями шаблону, вбудовані елементи стають
+    /// блоками моделі. `rest`: решта документа після `#show: шаблон` (де її
+    /// виводить шаблон, [`Part::Body`]); `site`: виклик у документі.
+    #[allow(clippy::too_many_arguments)]
+    fn items<'e>(
+        &mut self,
+        cx: &Cx,
+        items: &[Part],
+        scope: &mut Scope,
+        site: &Loc,
+        mut label: Option<Label>,
+        rest: &mut Option<&[Expr<'e>]>,
+        markup: bool,
+    ) {
+        for (k, item) in items.iter().enumerate() {
+            match item {
+                Part::Text(t) => self.template_text.push_str(t),
+                Part::Space => self.template_text.push(' '),
+                Part::Parbreak => self.flush_template(site),
+                Part::Unknown | Part::Label(_) => {}
+                Part::Source(node) => {
+                    self.flush_template(site);
+                    self.walked += 1;
+                    if let Some(expr) = node.cast::<Expr>() {
+                        self.code_expr(cx, expr, scope);
+                    }
+                }
+                Part::Body => {
+                    self.flush_template(site);
+                    if let Some(exprs) = rest.take() {
+                        let mut inner = *scope;
+                        if markup {
+                            self.markup_exprs(cx, exprs, &mut inner);
+                        } else {
+                            self.code_exprs(cx, exprs, &mut inner);
+                        }
+                    }
+                }
+                Part::Block(inner) => {
+                    self.flush_template(site);
+                    self.flush();
+                    self.items(cx, inner, &mut scope.clone(), site, None, rest, markup);
+                    self.flush_template(site);
+                    self.flush();
+                    self.last = Last::Other;
+                }
+                Part::Styled(effects, inner) => {
+                    let mut scope = *scope;
+                    self.restyle(&mut scope, Some(effects), site);
+                    let label = label.take();
+                    self.items(cx, inner, &mut scope, site, label, rest, markup);
+                }
+                Part::Maybe(inner) => {
+                    if has_elem(inner, "bibliography") {
+                        self.doc.has_bibliography = true;
+                    }
+                }
+                Part::Elem(e) => {
+                    self.flush_template(site);
+                    // Мітка після елемента (`[#figure(…) #label]`) чи після виклику
+                    let after = items[k + 1..]
+                        .iter()
+                        .find(|i| !matches!(i, Part::Space))
+                        .and_then(|i| match i {
+                            Part::Label(l) if l.is_empty() => Some(Label::Dynamic),
+                            Part::Label(l) => Some(Label::Name(l.clone())),
+                            // Щось невідоме після елемента може бути міткою
+                            Part::Unknown => Some(Label::Dynamic),
+                            _ => None,
+                        });
+                    let lbl = match e.func.as_str() {
+                        "heading" | "figure" => after.or_else(|| label.take()),
+                        _ => after,
+                    };
+                    self.elem(cx, e, scope, lbl, site, false);
+                }
+            }
+        }
+    }
+
+    /// Текст шаблону в абзаці закінчився: «РЕФЕРАТ» окремим рядком є
+    /// заголовком структурного елемента.
+    fn flush_template(&mut self, site: &Loc) {
+        let text = std::mem::take(&mut self.template_text);
+        let text = text.trim();
+        if !text.is_empty()
+            && text.chars().count() <= 40
+            && crate::rules::structural(text).is_some()
+        {
+            self.flush();
+            self.generated_heading(text, site.clone());
+        }
+    }
+
+    /// Вбудований елемент із вмісту шаблону чи обгортки; `doc`: виклик
+    /// просто в коді документа.
+    fn elem(
+        &mut self,
+        cx: &Cx,
+        e: &Elem,
+        scope: &mut Scope,
+        label: Option<Label>,
+        site: &Loc,
+        doc: bool,
+    ) {
+        match e.func.as_str() {
+            "heading" => {
+                self.flush();
+                let body = e.body();
                 let mut title = Text::default();
-                // Назва буває вмістом або рядком: `#heading("ІСПИТ")`
-                let body = named(call, "body")
-                    .or_else(|| content_args(call).last().copied())
-                    .or_else(|| {
-                        positional(call)
-                            .into_iter()
-                            .rfind(|e| matches!(e, Expr::Str(_)))
-                    });
                 if let Some(body) = body {
-                    self.inline(cx, body, &mut title);
-                    code_title(cx, &mut title, body.to_untyped());
+                    self.value_text(cx, body, site, true, &mut title);
+                    if let Some(node) = first_source(body) {
+                        code_title(cx, &mut title, &node);
+                    }
                 }
                 let level = ["level", "depth"]
                     .iter()
-                    .find_map(|n| match named(call, n) {
-                        Some(Expr::Int(i)) => Some(i.get().max(1) as usize),
+                    .find_map(|n| match e.named(n) {
+                        Some(Value::Int(i)) => Some((*i).max(1) as usize),
                         _ => None,
                     })
                     .unwrap_or(1);
-                let numbered = name == "heading"
-                    && match named(call, "numbering") {
-                        Some(Expr::None(_)) => false,
-                        Some(_) => true,
-                        None => scope.numbered,
-                    };
-                let loc = title.whole().unwrap_or_else(|| cx.loc(node));
+                let numbered = match e.named("numbering") {
+                    Some(Value::None) => false,
+                    Some(_) => true,
+                    None => scope.numbered,
+                };
+                let generated = !doc && !body.is_some_and(|b| first_source(b).is_some());
+                let loc = title.whole().unwrap_or_else(|| site.clone());
                 self.heading(Heading {
                     level,
                     title,
@@ -922,189 +1224,202 @@ impl Walker<'_> {
                     appendix: scope.appendix,
                     label,
                     loc,
-                    generated: false,
+                    generated,
                     markup: None,
                 });
             }
             "figure" => {
                 self.flush();
-                self.figure(cx, call, label);
+                self.last = Last::Other;
+                self.figure(cx, e, label, site);
             }
-            "fig" | "dstu-figure" => {
+            "bibliography" => {
                 self.flush();
-                let caption = named(call, "caption").or_else(|| positional(call).get(1).copied());
-                let caption = caption.map(|c| self.text_of(cx, c));
-                let label = label_arg(call).or(label);
-                let tick = self.next_tick();
-                self.emit(Block::Figure(Figure {
-                    tick,
-                    kind: FigureKind::Image,
-                    caption,
-                    label,
-                    header: None,
-                    floating: false,
-                    loc: cx.loc(node),
-                }));
-            }
-            "tab" | "dstu-table" => {
-                self.flush();
-                for cell in positional(call) {
-                    self.refs_in(cell.to_untyped());
-                }
-                let caption = named(call, "caption").map(|c| self.text_of(cx, c));
-                let columns = columns(named(call, "columns"));
-                let header = match named(call, "header") {
-                    Some(Expr::Array(array)) => {
-                        let cells: Vec<Text> = array
-                            .items()
-                            .filter_map(|item| match item {
-                                ast::ArrayItem::Pos(e) => Some(e),
-                                _ => None,
-                            })
-                            .map(|e| self.text_of(cx, e))
-                            .collect();
-                        Some(Header::new(cells, columns))
+                // `full:` і `style:` перевіряються лише з коду документа: шаблон
+                // може сам друкувати перелік інакше (`show bibliography`)
+                self.doc.has_bibliography = true;
+                match e.named("title") {
+                    Some(Value::None) => {}
+                    Some(v @ (Value::Content(_) | Value::Str(_))) => {
+                        let mut title = Text::default();
+                        self.value_text(cx, v, site, true, &mut title);
+                        let title = title.trimmed().to_owned();
+                        self.generated_heading(&title, site.clone());
                     }
-                    _ => None,
-                };
-                let label = label_arg(call).or(label);
-                let tick = self.next_tick();
-                self.emit(Block::Figure(Figure {
-                    tick,
-                    kind: FigureKind::Table,
-                    caption,
-                    label,
-                    header,
-                    floating: false,
-                    loc: cx.loc(node),
-                }));
+                    _ => self.generated_heading("Перелік джерел посилання", site.clone()),
+                }
+            }
+            "outline" => {
+                self.flush();
+                if !matches!(e.named("title"), Some(Value::None)) {
+                    self.generated_heading("Зміст", site.clone());
+                }
             }
             "list" | "enum" => {
                 self.flush();
-                let items: Vec<(SyntaxNode, ast::Markup)> = positional(call)
-                    .into_iter()
-                    .filter_map(|e| match e {
-                        Expr::ContentBlock(b) => Some((e.to_untyped().clone(), b.body())),
-                        _ => None,
+                let nodes: Vec<SyntaxNode> = e.args.pos.iter().filter_map(first_source).collect();
+                let items: Vec<(SyntaxNode, ast::Markup)> = nodes
+                    .iter()
+                    .filter_map(|node| {
+                        let body = node.cast::<ast::ContentBlock>()?.body();
+                        Some((node.clone(), body))
                     })
                     .collect();
                 if !items.is_empty() {
                     self.list(cx, &items, false, *scope);
                 }
             }
-            "bibliography" | "bib" | "dstu-bibliography" => {
+            "table" | "grid" => {
                 self.flush();
-                self.doc.has_bibliography = true;
-                self.bib(cx, call.args());
-                if !matches!(named(call, "title"), Some(Expr::None(_))) {
-                    self.generated_heading("Перелік джерел посилання", cx.loc(node));
-                }
+                self.elem_terms(cx, e, site);
+                self.last = Last::Other;
             }
-            "outline" | "contents" => {
+            "image" | "raw" | "math.equation" => {
                 self.flush();
-                if !matches!(named(call, "title"), Some(Expr::None(_))) {
-                    self.generated_heading("Зміст", cx.loc(node));
-                }
+                self.last = Last::Other;
             }
-            "abstract" => {
-                self.flush();
-                self.generated_heading("Реферат", cx.loc(node));
-                for arg in content_args(call) {
-                    let mut inner = *scope;
-                    self.code_expr(cx, arg, &mut inner);
-                    self.flush();
+            _ => {}
+        }
+    }
+
+    /// Текст значення: вміст документа з місцями в коді, текст шаблону (якщо
+    /// `template`) на місці виклику.
+    fn value_text(&mut self, cx: &Cx, value: &Value, site: &Loc, template: bool, out: &mut Text) {
+        match value {
+            Value::Str(s) => self.str_text(cx, s, site, template, out),
+            Value::Content(items) => self.items_text(cx, items, site, template, out),
+            _ => {}
+        }
+    }
+
+    /// Рядок, що прийшов з коду документа (`fig(…, "Підпис")`): шукаємо його
+    /// літерал у виклику, щоб текст мав місце в коді. Решта рядка (дописана
+    /// шаблоном) — на місці виклику, якщо `template`.
+    fn str_text(&mut self, cx: &Cx, s: &str, site: &Loc, template: bool, out: &mut Text) {
+        let mut best: Option<(String, std::ops::Range<usize>, bool)> = None;
+        str_literals(
+            &LinkedNode::new(cx.root()),
+            &site.range,
+            &mut |value, range, exact| {
+                if !value.is_empty()
+                    && s.starts_with(value.as_str())
+                    && best.as_ref().is_none_or(|(b, _, _)| value.len() > b.len())
+                {
+                    best = Some((value, range, exact));
                 }
+            },
+        );
+        let used = match best {
+            Some((value, range, exact)) => {
+                if exact {
+                    out.push_exact(&value, site.file, range.start + 1);
+                } else {
+                    out.push_mapped(&value, site.file, range);
+                }
+                value.len()
             }
-            "appendices" => {
-                self.flush();
-                let mut inner = Scope {
-                    numbered: true,
-                    appendix: true,
-                };
-                for arg in positional(call) {
-                    self.code_expr(cx, arg, &mut inner);
+            None => 0,
+        };
+        if template || used == 0 {
+            out.push_mapped(&s[used..], site.file, site.range.clone());
+        }
+    }
+
+    fn items_text(&mut self, cx: &Cx, items: &[Part], site: &Loc, template: bool, out: &mut Text) {
+        for item in items {
+            match item {
+                Part::Source(node) => {
+                    if let Some(expr) = node.cast::<Expr>() {
+                        self.inline(cx, expr, out);
+                    }
                 }
-                self.flush();
-            }
-            _ if is_block_name(name) || !in_markup || has_blocks(call) => {
-                // Контейнер (`align`, `block`, власна обгортка з абзацами): його
-                // вміст складається з окремих абзаців
-                self.flush();
-                if matches!(name, "table" | "grid") {
-                    self.table_terms(cx, call);
+                Part::Text(t) if template => out.push_mapped(t, site.file, site.range.clone()),
+                Part::Space if template => out.push_mapped(" ", site.file, site.range.clone()),
+                Part::Styled(_, inner) | Part::Block(inner) => {
+                    self.items_text(cx, inner, site, template, out)
                 }
-                let mut inner = *scope;
-                for arg in content_args(call) {
-                    self.code_expr(cx, arg, &mut inner);
-                    self.flush();
-                }
-                // Проміжок чи розрив сторінки між формулами не відокремлює їх
-                // текстом (7.10.11)
-                let spacing = matches!(name, "v" | "pagebreak" | "colbreak");
-                if is_block_name(name) && !(spacing && self.last == Last::Equation) {
-                    self.last = Last::Other;
-                }
-            }
-            _ => {
-                let mut text = std::mem::take(&mut self.para);
-                self.inline_call(cx, call, &mut text);
-                self.para = text;
+                _ => {}
             }
         }
     }
 
-    fn figure(&mut self, cx: &Cx, call: ast::FuncCall, label: Option<Label>) {
-        let node = call.to_untyped();
-        let body = positional(call).first().copied();
-        if let Some(body) = body {
-            self.refs_in(body.to_untyped());
+    fn figure(&mut self, cx: &Cx, e: &Elem, label: Option<Label>, site: &Loc) {
+        let body = e.args.pos.first().or_else(|| e.named("body"));
+        // Посилання в тілі (клітинки таблиці, підписи всередині)
+        if let Some(Value::Content(items)) = body {
+            self.refs_in_items(items);
         }
-        if matches!(named(call, "numbering"), Some(Expr::None(_))) {
+        if matches!(e.named("numbering"), Some(Value::None)) {
             return;
         }
-        let table = body.and_then(find_table);
-        if let Some(t) = table {
-            self.table_terms(cx, t);
+        let table = body.and_then(|b| find_elem(b, "table"));
+        if let Some(t) = &table {
+            self.elem_terms(cx, t, site);
         }
-        let kind = match named(call, "kind") {
-            Some(Expr::Ident(i)) if i.as_str() == "table" => FigureKind::Table,
-            Some(Expr::Ident(i)) if i.as_str() == "image" => FigureKind::Image,
-            // Лістинги й власні види фігур стандарт так не описує
+        let kind = match e.named("kind") {
+            Some(Value::Func(f)) => match &**f {
+                eval::Func::Builtin(k) if k == "table" => FigureKind::Table,
+                eval::Func::Builtin(k) if k == "image" => FigureKind::Image,
+                // Лістинги й власні види фігур стандарт так не описує
+                _ => return,
+            },
             Some(_) => return,
-            None if table.is_some() => FigureKind::Table,
-            None if body.is_some_and(is_listing) => return,
-            None => FigureKind::Image,
+            None => match body.map(|b| self.body_kind(cx, b)) {
+                Some(BodyKind::Table) => FigureKind::Table,
+                Some(BodyKind::Image) | None => FigureKind::Image,
+                Some(BodyKind::Raw | BodyKind::Unknown) => return,
+            },
         };
-        let caption = named(call, "caption").map(|c| {
+        let caption = e.named("caption").and_then(|c| {
             let c = match c {
                 // `figure.caption(…)[назва]`
-                Expr::FuncCall(inner) => content_args(inner).last().copied().unwrap_or(c),
+                Value::Content(items) => match items.first() {
+                    Some(Part::Elem(inner)) if inner.func == "figure.caption" => inner.body()?,
+                    _ => c,
+                },
+                Value::None => return None,
                 c => c,
             };
-            self.text_of(cx, c)
+            let mut text = Text::default();
+            self.value_text(cx, c, site, false, &mut text);
+            // Підпис лише з тексту шаблону чи виразу (`"…" + $b$`)
+            if text.trimmed().is_empty() {
+                self.value_text(cx, c, site, true, &mut text);
+            }
+            Some(text)
         });
-        let header = table.and_then(|t| {
-            let columns = columns(named(t, "columns"));
-            positional(t).into_iter().find_map(|e| match e {
-                Expr::FuncCall(h) if callee_path(h.callee()).ends_with(&["table", "header"]) => {
-                    let cells: Vec<Text> = positional(h)
-                        .into_iter()
-                        .map(|cell| {
-                            let cell = match cell {
-                                Expr::FuncCall(c) => {
-                                    content_args(c).last().copied().unwrap_or(cell)
-                                }
-                                cell => cell,
-                            };
-                            self.text_of(cx, cell)
-                        })
-                        .collect();
-                    Some(Header::new(cells, columns))
-                }
-                _ => None,
+        let header = table.as_ref().and_then(|t| {
+            let columns = match t.named("columns") {
+                None => Some(1),
+                Some(Value::Int(i)) => Some((*i).max(1) as usize),
+                Some(Value::Array(a)) => Some(a.len().max(1)),
+                Some(_) => None,
+            };
+            t.args.pos.iter().find_map(|v| {
+                let h = find_elem(v, "table.header")?;
+                let cells: Vec<Text> = h
+                    .args
+                    .pos
+                    .iter()
+                    .map(|cell| {
+                        let cell = match find_elem(cell, "table.cell")
+                            .as_ref()
+                            .and_then(|c| c.body().cloned())
+                        {
+                            Some(body) => body,
+                            None => cell.clone(),
+                        };
+                        let mut text = Text::default();
+                        self.value_text(cx, &cell, site, false, &mut text);
+                        text
+                    })
+                    .collect();
+                Some(Header::new(cells, columns))
             })
         });
-        let floating = named(call, "placement").is_some_and(|p| !matches!(p, Expr::None(_)));
+        let floating = e
+            .named("placement")
+            .is_some_and(|p| !matches!(p, Value::None));
         let tick = self.next_tick();
         self.emit(Block::Figure(Figure {
             tick,
@@ -1113,8 +1428,129 @@ impl Walker<'_> {
             label,
             header,
             floating,
-            loc: cx.loc(node),
+            loc: site.clone(),
         }));
+    }
+
+    /// Що в тілі рисунка: таблиця, лістинг, зображення.
+    fn body_kind(&mut self, cx: &Cx, value: &Value) -> BodyKind {
+        let Value::Content(items) = value else {
+            return BodyKind::Image;
+        };
+        let mut found = BodyKind::Image;
+        for item in items.iter() {
+            let kind = match item {
+                Part::Elem(e) => match e.func.as_str() {
+                    "table" => BodyKind::Table,
+                    "raw" => BodyKind::Raw,
+                    "image" => BodyKind::Image,
+                    _ => continue,
+                },
+                Part::Block(inner) | Part::Styled(_, inner) => {
+                    self.body_kind(cx, &Value::Content(inner.clone()))
+                }
+                // Вміст відомої функції, якого не обчислити (`cetz.canvas`)
+                Part::Unknown => continue,
+                Part::Source(node) => self.source_kind(cx, node),
+                _ => continue,
+            };
+            match kind {
+                BodyKind::Image => {}
+                BodyKind::Unknown => found = BodyKind::Unknown,
+                decisive => return decisive,
+            }
+        }
+        found
+    }
+
+    /// Що в коді документа (тілі рисунка): виклики обчислюються.
+    fn source_kind(&mut self, cx: &Cx, node: &SyntaxNode) -> BodyKind {
+        let Some(expr) = node.cast::<Expr>() else {
+            return BodyKind::Image;
+        };
+        let exprs: Vec<Expr> = match expr {
+            Expr::Raw(_) => return BodyKind::Raw,
+            Expr::ContentBlock(b) => b.body().exprs().collect(),
+            e => vec![e],
+        };
+        let file = self.doc.files[cx.file].path.clone();
+        let mut found = BodyKind::Image;
+        for e in exprs {
+            let kind = match e {
+                Expr::Raw(_) => BodyKind::Raw,
+                Expr::FuncCall(call) => {
+                    let value = self.ev.eval_doc_in(&file, e);
+                    match value.items().as_slice() {
+                        // Невідома функція: що вона дає, не видно
+                        [Part::Source(n)] if n.span() == call.span() => BodyKind::Unknown,
+                        _ => self.body_kind(cx, &value),
+                    }
+                }
+                _ => continue,
+            };
+            match kind {
+                BodyKind::Image => {}
+                BodyKind::Unknown => found = BodyKind::Unknown,
+                decisive => return decisive,
+            }
+        }
+        found
+    }
+
+    /// Посилання у вмісті документа з аргументів.
+    fn refs_in_items(&mut self, items: &[Part]) {
+        for item in items {
+            match item {
+                Part::Source(node) => self.refs_in(node),
+                Part::Block(inner) | Part::Styled(_, inner) => self.refs_in_items(inner),
+                Part::Elem(e) => {
+                    for v in e.args.pos.iter().chain(e.args.named.iter().map(|(_, v)| v)) {
+                        if let Value::Content(inner) = v {
+                            self.refs_in_items(inner);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Перша колонка таблиці-елемента в переліку скорочень.
+    fn elem_terms(&mut self, cx: &Cx, table: &Elem, site: &Loc) {
+        if self.section() != Some(crate::rules::ABBREVIATIONS) {
+            return;
+        }
+        let columns = match table.named("columns") {
+            None => 1,
+            Some(Value::Int(i)) => (*i).max(1) as usize,
+            Some(Value::Array(a)) => a.len().max(1),
+            Some(_) => return,
+        };
+        let cells: Vec<Value> = table
+            .args
+            .pos
+            .iter()
+            .filter(|v| {
+                !matches!(v, Value::Content(items) if matches!(
+                    items.first(),
+                    Some(Part::Elem(e)) if e.func.ends_with("header")
+                        || e.func.ends_with("footer")
+                        || e.func.ends_with("hline")
+                        || e.func.ends_with("vline")
+                ))
+            })
+            .cloned()
+            .collect();
+        let texts = cells
+            .iter()
+            .step_by(columns)
+            .map(|cell| {
+                let mut text = Text::default();
+                self.value_text(cx, cell, site, false, &mut text);
+                text
+            })
+            .collect();
+        self.terms(texts);
     }
 
     /// `keywords: (…)` у виклику (`abstract`) чи словнику рецепта.
@@ -1173,33 +1609,6 @@ impl Walker<'_> {
         }
     }
 
-    /// Перша колонка таблиці в переліку скорочень.
-    fn table_terms(&mut self, cx: &Cx, table: ast::FuncCall) {
-        if self.section() != Some(crate::rules::ABBREVIATIONS) {
-            return;
-        }
-        // Кількість колонок з виразу (`(auto,) * 2`, змінна) не видно: без
-        // неї першої колонки не знайти
-        let Some(columns) = columns(named(table, "columns")) else {
-            return;
-        };
-        let cells: Vec<Expr> = positional(table)
-            .into_iter()
-            .filter(|e| {
-                !matches!(e, Expr::FuncCall(c) if matches!(
-                    callee_path(c.callee()).last(),
-                    Some(&("header" | "footer" | "hline" | "vline"))
-                ))
-            })
-            .collect();
-        let texts = cells
-            .into_iter()
-            .step_by(columns)
-            .map(|cell| self.text_of(cx, cell))
-            .collect();
-        self.terms(texts);
-    }
-
     // --- Правила й файли ----------------------------------------------------------
 
     fn record_set(&mut self, cx: &Cx, set: ast::SetRule, selector: Option<String>) {
@@ -1224,78 +1633,146 @@ impl Walker<'_> {
         });
     }
 
-    fn show_rule(&mut self, cx: &Cx, show: ast::ShowRule, scope: &mut Scope) {
-        if let Some(selector) = show.selector() {
-            // `show heading.where(level: 1): …` -> `heading`
-            let mut path = callee_path(selector);
-            if path.last() == Some(&"where") {
-                path.pop();
-            }
-            let name = path.join(".");
-            match show.transform() {
-                // `show footnote.entry: set text(size: 12pt)` налаштовує сам елемент
-                Expr::SetRule(set) => self.record_set(cx, set, Some(name)),
-                _ if name == "ref" => self.doc.custom_ref = true,
-                _ => {}
-            }
+    /// `show селектор: …`: налаштування елемента.
+    fn show_selector(&mut self, cx: &Cx, show: ast::ShowRule, scope: &mut Scope) {
+        let Some(selector) = show.selector() else {
             return;
-        }
-        if self.doc.template.is_none() {
-            self.doc.template = Some(cx.loc(show.to_untyped()));
-        }
-        let transform = show.transform();
-        let (path, call) = match transform {
-            Expr::FuncCall(call) => (callee_path(call.callee()), Some(call)),
-            e => (callee_path(e), None),
         };
-        let name = template_name(&path);
-        if name == Some("appendices") {
-            self.flush();
-            scope.appendix = true;
-            scope.numbered = true;
-            return;
+        // `show heading.where(level: 1): …` -> `heading`
+        let mut path = callee_path(selector);
+        if path.last() == Some(&"where") {
+            path.pop();
         }
-        // `#show: шаблон` вмикає нумерацію заголовків, як `style.dstu`
-        scope.numbered = true;
-        let Some(call) = call else { return };
-        for arg in call.args().items() {
-            let ast::Arg::Named(n) = arg else { continue };
-            match n.name().as_str() {
-                "abstract" if !matches!(n.expr(), Expr::None(_)) => {
-                    self.generated_heading("Реферат", cx.loc(n.to_untyped()));
-                    self.keywords_named(cx, n);
+        let name = path.join(".");
+        let body = eval::is_body_selector(selector);
+        match show.transform() {
+            // `show footnote.entry: set text(size: 12pt)` налаштовує сам елемент
+            Expr::SetRule(set) => {
+                self.record_set(cx, set, Some(name.clone()));
+                // `show par: set text(…)` діє на весь основний текст
+                if body {
+                    let file = self.doc.files[cx.file].path.clone();
+                    if let Some(effect) = self.ev.set_in(&file, set) {
+                        self.restyle(
+                            scope,
+                            Some(&[Effect::Set(effect)]),
+                            &cx.loc(set.to_untyped()),
+                        );
+                    }
                 }
-                "bib-path" | "bib" | "bibliography" if !matches!(n.expr(), Expr::None(_)) => {
-                    self.doc.has_bibliography = true;
-                    self.deferred
-                        .push(Deferred::Bibliography(cx.loc(n.to_untyped())));
-                }
-                "appendices" => self
-                    .deferred
-                    .push(Deferred::Appendices(cx.file, n.expr().to_untyped().clone())),
-                _ => {}
             }
+            // `show par: it => …`: абзаци змінено невідомо як
+            _ if body => self.restyle(scope, None, &cx.loc(show.to_untyped())),
+            _ if name == "ref" => self.doc.custom_ref = true,
+            _ => {}
         }
     }
 
-    fn run_deferred(&mut self) {
-        for deferred in std::mem::take(&mut self.deferred) {
-            match deferred {
-                Deferred::Bibliography(loc) => {
-                    self.generated_heading("Перелік джерел посилання", loc)
-                }
-                Deferred::Appendices(file, node) => {
-                    let cx = self.cx(file);
-                    let mut scope = Scope {
-                        numbered: true,
-                        appendix: true,
-                    };
-                    if let Some(expr) = node.cast::<Expr>() {
-                        self.code_expr(&cx, expr, &mut scope);
+    /// `#show: шаблон`: шаблон обчислюється над рештою документа (`rest`) і
+    /// сам вирішує, де й з якими налаштуваннями її вивести.
+    fn show_rule(
+        &mut self,
+        cx: &Cx,
+        show: ast::ShowRule,
+        scope: &mut Scope,
+        rest: &[Expr],
+        markup: bool,
+    ) {
+        let walk = |this: &mut Self, exprs: &[Expr], scope: &mut Scope| {
+            if markup {
+                this.markup_exprs(cx, exprs, scope);
+            } else {
+                this.code_exprs(cx, exprs, scope);
+            }
+        };
+        let transform = show.transform();
+        // `show: set text(…)`: те саме, що `set`
+        if matches!(transform, Expr::SetRule(_)) {
+            self.code_expr(cx, transform, scope);
+            walk(self, rest, scope);
+            return;
+        }
+        let site = cx.loc(show.to_untyped());
+        if self.doc.template.is_none() {
+            self.doc.template = Some(site.clone());
+        }
+        if let Expr::FuncCall(call) = transform {
+            self.keywords(cx, call.args());
+        }
+        let file = self.doc.files[cx.file].path.clone();
+        let shown = self.ev.show_in(&file, transform);
+        let mut pending = Some(rest);
+        self.items(
+            cx,
+            &shown.items(),
+            &mut scope.clone(),
+            &site,
+            None,
+            &mut pending,
+            markup,
+        );
+        self.flush_template(&site);
+        // Де шаблон виводить решту документа, не видно: її однаково
+        // перевіряємо, але налаштування для неї невідомі
+        if let Some(rest) = pending {
+            let mut inner = *scope;
+            self.restyle(&mut inner, None, &site);
+            walk(self, rest, &mut inner);
+        }
+    }
+
+    /// Нові налаштування для вмісту після `effects`; `None`: невідомо які
+    /// (шаблону не простежити). `site`: що в документі їх застосовує.
+    fn restyle(&mut self, scope: &mut Scope, effects: Option<&[Effect]>, site: &Loc) {
+        let mut style = self.doc.styles[scope.style].clone();
+        match effects {
+            None => style.forget(),
+            Some(effects) => {
+                for effect in effects {
+                    match effect {
+                        Effect::Opaque => style.forget(),
+                        Effect::Set(set) => {
+                            style.apply(set, &|arg: &SetArg| self.origin(set, arg, site));
+                            if set.target == "heading" {
+                                heading_set(scope, set);
+                            }
+                        }
                     }
-                    self.flush();
                 }
             }
+        }
+        self.doc.styles.push(style);
+        scope.style = self.doc.styles.len() - 1;
+    }
+
+    /// Де задано аргумент `set`: у файлі документа чи (для шаблону поза
+    /// документом) рядок, що застосовує шаблон.
+    fn origin(&self, set: &SetEffect, arg: &SetArg, site: &Loc) -> Origin {
+        if let Some(file) = self.doc.files.iter().position(|f| f.path == set.path) {
+            let source = &self.doc.files[file].source;
+            let range = |span| source.find(span).map(|n| n.range());
+            if let Some(r) = range(set.span) {
+                return Origin {
+                    loc: Loc { file, range: r },
+                    value: range(arg.span).map(|range| Loc { file, range }),
+                    template: None,
+                };
+            }
+        }
+        let shown = set
+            .path
+            .strip_prefix(&self.root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| {
+                set.path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        Origin {
+            loc: site.clone(),
+            value: None,
+            template: Some(shown),
         }
     }
 
@@ -1393,23 +1870,136 @@ fn code_title(cx: &Cx, title: &mut Text, body: &SyntaxNode) {
     }
 }
 
-fn apply_set(set: ast::SetRule, scope: &mut Scope) {
-    if callee_path(set.target()).last() != Some(&"heading") {
-        return;
-    }
-    for arg in set.args().items() {
-        let ast::Arg::Named(n) = arg else { continue };
-        match n.name().as_str() {
-            "numbering" => scope.numbered = !matches!(n.expr(), Expr::None(_)),
-            "supplement" => {
-                let text = n.expr().to_untyped().full_text();
-                if text.contains("Додаток") {
+/// `set heading(…)`: нумерація й додатки (`supplement: [Додаток]`, нумерація
+/// літерою `"А.1"`).
+fn heading_set(scope: &mut Scope, set: &SetEffect) {
+    if let Some(a) = set.arg("numbering") {
+        match &a.value {
+            Value::None => scope.numbered = false,
+            Value::Unknown => {}
+            Value::Str(p) => {
+                scope.numbered = true;
+                if p.trim_start().starts_with(['А', 'A']) {
                     scope.appendix = true;
                 }
             }
-            _ => {}
+            _ => scope.numbered = true,
         }
     }
+    // Функція нумерації дає першому заголовку літеру: «А»
+    if set
+        .arg("numbering-first")
+        .and_then(|a| a.value.text())
+        .is_some_and(|t| t.trim_start().starts_with(['А', 'A']))
+    {
+        scope.appendix = true;
+    }
+    if set
+        .arg("supplement")
+        .and_then(|a| a.value.text())
+        .is_some_and(|t| t.contains("Додаток"))
+    {
+        scope.appendix = true;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BodyKind {
+    Image,
+    Table,
+    Raw,
+    /// Тіло з функції, якої не обчислити.
+    Unknown,
+}
+
+/// Рядкові літерали всередині `range`: (значення, місце, чи текст у коді
+/// збігається зі значенням, тобто без екранування).
+fn str_literals(
+    node: &LinkedNode,
+    range: &std::ops::Range<usize>,
+    f: &mut dyn FnMut(String, std::ops::Range<usize>, bool),
+) {
+    let r = node.range();
+    if r.end <= range.start || r.start >= range.end {
+        return;
+    }
+    if let Some(lit) = node.get().cast::<ast::Str>() {
+        let value = lit.get().to_string();
+        let code = node.get().full_text();
+        let exact = code.len() >= 2 && code[1..code.len() - 1] == *value;
+        f(value, r, exact);
+        return;
+    }
+    for child in node.children() {
+        str_literals(&child, range, f);
+    }
+}
+
+/// Перший вузол документа у значенні.
+fn first_source(value: &Value) -> Option<SyntaxNode> {
+    fn find(items: &[Part]) -> Option<SyntaxNode> {
+        items.iter().find_map(|i| match i {
+            Part::Source(node) => Some(node.clone()),
+            Part::Styled(_, inner) | Part::Block(inner) => find(inner),
+            _ => None,
+        })
+    }
+    match value {
+        Value::Content(items) => find(items),
+        _ => None,
+    }
+}
+
+/// Перший елемент `func` у значенні (крізь блоки й налаштування).
+fn find_elem(value: &Value, func: &str) -> Option<Rc<Elem>> {
+    fn find(items: &[Part], func: &str) -> Option<Rc<Elem>> {
+        items.iter().find_map(|i| match i {
+            Part::Elem(e) if e.func == func => Some(e.clone()),
+            Part::Styled(_, inner) | Part::Block(inner) => find(inner, func),
+            _ => None,
+        })
+    }
+    match value {
+        Value::Content(items) => find(items, func),
+        _ => None,
+    }
+}
+
+/// Чи є у вмісті елемент `func` (зокрема лише можливий).
+fn has_elem(items: &[Part], func: &str) -> bool {
+    items.iter().any(|i| match i {
+        Part::Elem(e) => e.func == func,
+        Part::Styled(_, inner) | Part::Block(inner) | Part::Maybe(inner) => has_elem(inner, func),
+        _ => false,
+    })
+}
+
+/// Чи дає вміст блок, а не текст у рядку.
+fn has_block(items: &[Part]) -> bool {
+    items.iter().any(|i| match i {
+        Part::Elem(e) => matches!(
+            e.func.as_str(),
+            "heading"
+                | "figure"
+                | "table"
+                | "grid"
+                | "list"
+                | "enum"
+                | "bibliography"
+                | "outline"
+                | "image"
+        ),
+        Part::Block(_) | Part::Parbreak => true,
+        Part::Styled(_, inner) => has_block(inner),
+        _ => false,
+    })
+}
+
+/// Чи є у виклику аргументи-вміст документа.
+fn has_content_args(call: ast::FuncCall) -> bool {
+    positional(call)
+        .iter()
+        .any(|e| matches!(e, Expr::ContentBlock(_) | Expr::ModuleInclude(_)))
 }
 
 /// Шлях виклику: `style.appendices` -> `["style", "appendices"]`.
@@ -1460,13 +2050,6 @@ fn named_in<'a>(args: ast::Args<'a>, name: &str) -> Option<Expr<'a>> {
     })
 }
 
-fn label_arg(call: ast::FuncCall) -> Option<Label> {
-    named(call, "label").and_then(|e| match e {
-        Expr::None(_) => None,
-        e => Some(label_value(e)),
-    })
-}
-
 /// Позиційні аргументи-вміст: `[…]` і вирази, що його дають.
 fn content_args(call: ast::FuncCall) -> Vec<Expr> {
     positional(call)
@@ -1478,50 +2061,6 @@ fn content_args(call: ast::FuncCall) -> Vec<Expr> {
             )
         })
         .collect()
-}
-
-/// Кількість колонок таблиці: без аргументу одна, як у typst; `None`, якщо
-/// її задано виразом, значення якого з коду не видно.
-fn columns(expr: Option<Expr>) -> Option<usize> {
-    match expr {
-        None => Some(1),
-        Some(Expr::Int(i)) => Some(i.get().max(1) as usize),
-        Some(Expr::Array(a)) if a.items().all(|i| matches!(i, ast::ArrayItem::Pos(_))) => {
-            Some(a.items().count().max(1))
-        }
-        _ => None,
-    }
-}
-
-/// Перша `table(…)` у тілі фігури.
-fn find_table(expr: Expr) -> Option<ast::FuncCall> {
-    match expr {
-        Expr::FuncCall(call) => {
-            if callee_path(call.callee()).last() == Some(&"table") {
-                return Some(call);
-            }
-            positional(call).into_iter().find_map(find_table)
-        }
-        Expr::ContentBlock(block) => block.body().exprs().find_map(find_table),
-        Expr::CodeBlock(block) => block.body().exprs().find_map(find_table),
-        Expr::Parenthesized(p) => find_table(p.expr()),
-        _ => None,
-    }
-}
-
-/// Лістинг: `raw` чи обгортка над ним (`code(read(…))`, `listing`, `sourcecode`).
-fn is_listing(expr: Expr) -> bool {
-    match expr {
-        Expr::Raw(_) => true,
-        Expr::FuncCall(call) => callee_name(call).is_some_and(|name| {
-            let name = name.to_lowercase();
-            ["raw", "code", "listing", "lst", "sourcecode"]
-                .iter()
-                .any(|n| name.contains(n))
-        }),
-        Expr::ContentBlock(block) => block.body().exprs().any(is_listing),
-        _ => false,
-    }
 }
 
 /// Вбудовані елементи абзацу.
@@ -1566,37 +2105,11 @@ fn is_block_name(name: &str) -> bool {
             | "stack"
             | "table"
             | "v"
-            | "title-heading"
-            | "title-page"
     )
 }
 
-fn is_block_call(call: ast::FuncCall) -> bool {
-    callee_name(call).is_some_and(|name| {
-        is_block_name(name)
-            || matches!(
-                name,
-                "heading" | "nheading" | "figure" | "fig" | "dstu-figure" | "tab" | "dstu-table"
-            )
-    })
-}
-
-/// Чи є у вмісті виклику абзаци, заголовки чи переліки.
-fn has_blocks(call: ast::FuncCall) -> bool {
-    content_args(call).into_iter().any(|arg| match arg {
-        Expr::ContentBlock(block) => block.body().exprs().any(|e| {
-            matches!(
-                e,
-                Expr::Parbreak(_) | Expr::Heading(_) | Expr::ListItem(_) | Expr::EnumItem(_)
-            ) || matches!(e, Expr::Equation(eq) if eq.block())
-                || matches!(e, Expr::FuncCall(c) if is_block_call(c))
-        }),
-        _ => false,
-    })
-}
-
 /// Шлях без `.` і `..` (файлу може ще не бути, тож без `canonicalize`).
-fn normalize(path: &Path) -> PathBuf {
+pub(crate) fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for part in path.components() {
         match part {

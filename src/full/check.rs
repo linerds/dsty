@@ -14,7 +14,7 @@ use regex::Regex;
 use super::facts::{Entry, Facts, Item, Page, Run};
 use crate::model::{Block, Doc, Heading, Label};
 use crate::rules::{self, Found, structural};
-use crate::text::{Loc, quote};
+use crate::text::{Loc, fmt_num, fmt_pt, mm, quote};
 
 /// Літери додатків (7.15.1): українська абетка без Ґ, Є, З, І, Ї, Й, О, Ч, Ь
 /// або латинська без I та O.
@@ -580,15 +580,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn mm(pt: f64) -> String {
-        let v = pt / MM;
-        if (v - v.round()).abs() < 0.05 {
-            format!("{} мм", v.round())
-        } else {
-            format!("{:.1} мм", v).replace('.', ",")
-        }
-    }
-
     // --- Сторінки -------------------------------------------------------------------
 
     fn pages(&mut self) {
@@ -596,44 +587,6 @@ impl<'a> Checker<'a> {
         if pages.is_empty() {
             return;
         }
-        let near = |a: f64, b: f64| (a - b).abs() < 1.5;
-        if let Some((pg, p)) = pages.iter().find(|(_, p)| {
-            let (s, l) = (p.w.min(p.h), p.w.max(p.h));
-            !(near(s, 595.28) && near(l, 841.89) || near(s, 841.89) && near(l, 1190.55))
-        }) {
-            let loc = self
-                .doc
-                .setting("page", &["paper", "width", "height", "flipped"]);
-            self.add(
-                "page-size",
-                loc,
-                format!(
-                    "с. {pg}: формат {} × {}, має бути А4 (210 мм × 297 мм)",
-                    Self::mm(p.w),
-                    Self::mm(p.h)
-                ),
-            );
-        }
-
-        if let Some((pg, p)) = pages.iter().find(|(_, p)| {
-            let (t, r, b, l) = p.margins();
-            t < 20.0 * MM - 0.5 || b < 20.0 * MM - 0.5 || l < 25.0 * MM - 0.5 || r < 10.0 * MM - 0.5
-        }) {
-            let (t, r, b, l) = p.margins();
-            let loc = self.doc.setting("page", &["margin"]);
-            self.add(
-                "page-margins",
-                loc,
-                format!(
-                    "с. {pg}: береги верхній {}, нижній {}, лівий {}, правий {}; рекомендовано не менше 20, 20, 25 і 10 мм",
-                    Self::mm(t),
-                    Self::mm(b),
-                    Self::mm(l),
-                    Self::mm(r)
-                ),
-            );
-        }
-
         // Номери сторінок (7.3.1, 7.3.3)
         let loc = self.doc.setting("page", &["numbering", "number-align"]);
         fn shown(p: &Page) -> Option<&str> {
@@ -916,8 +869,8 @@ impl<'a> Checker<'a> {
                         i,
                         format!(
                             "заголовок {shown} починається за {} від берега, має бути з абзацного відступу ({})",
-                            Self::mm(start - left),
-                            Self::mm(self.indent)
+                            mm(start - left),
+                            mm(self.indent)
                         ),
                     ));
                 }
@@ -1329,8 +1282,8 @@ impl<'a> Checker<'a> {
                             loc.clone(),
                             format!(
                                 "назва таблиці починається за {} від берега, а друкують з абзацного відступу ({})",
-                                Self::mm(x - left),
-                                Self::mm(self.indent)
+                                mm(x - left),
+                                mm(self.indent)
                             ),
                         );
                     }
@@ -1576,7 +1529,7 @@ impl<'a> Checker<'a> {
                         loc.clone(),
                         format!(
                             "номер формули закінчується за {} від правого берега, а друкують у крайньому правому положенні",
-                            Self::mm(right - end)
+                            mm(right - end)
                         ),
                     );
                 }
@@ -1613,7 +1566,7 @@ impl<'a> Checker<'a> {
                         loc,
                         format!(
                             "рядок «де …» під формулою надруковано з абзацним відступом {}, а пояснення познак починають від лівого берега: оберніть його в `#par(first-line-indent: 0pt)[де …]`",
-                            Self::mm(indent)
+                            mm(indent)
                         ),
                     );
                 } else if indent < -1.0 {
@@ -1622,7 +1575,7 @@ impl<'a> Checker<'a> {
                         loc,
                         format!(
                             "рядок «де …» під формулою виступає за лівий берег на {}: пояснення познак починають від лівого берега, оберніть його в `#par(first-line-indent: 0pt)[де …]`",
-                            Self::mm(-indent)
+                            mm(-indent)
                         ),
                     );
                 }
@@ -1738,7 +1691,7 @@ impl<'a> Checker<'a> {
                     loc,
                     format!(
                         "лінія над виносками завдовжки {}, має бути 30–40 мм",
-                        Self::mm(len)
+                        mm(len)
                     ),
                 );
             }
@@ -1792,131 +1745,31 @@ impl<'a> Checker<'a> {
             return;
         }
         let total = pars.len();
-        let d = self.indent;
 
-        // Абзацний відступ (7.1.22)
-        let loc = self.doc.setting("par", &["first-line-indent"]);
-        if d == 0.0 {
-            self.add(
-                "par-indent",
-                loc.clone(),
-                "в абзацах немає абзацного відступу, має бути п'ять знаків (≈ 12,5 мм)".into(),
-            );
-        } else if !(10.0 * MM - 0.3..=15.0 * MM + 0.3).contains(&d) {
-            self.add(
-                "par-indent",
-                loc.clone(),
-                format!(
-                    "абзацний відступ {}, має дорівнювати п'яти знакам (≈ 12,5 мм)",
-                    Self::mm(d)
-                ),
-            );
-        }
-        let mut first_after_block = None;
-        let mut odd = Vec::new();
-        for &i in &pars {
-            let Item::Par(p) = &self.e[i].item else {
-                continue;
-            };
-            let prev = (self.body_start..i).rev().find(|&j| {
-                Self::is_content(&self.e[j].item) && !matches!(&self.e[j].item, Item::Run(_))
-            });
-            let after_block = prev.is_some_and(|j| !matches!(self.e[j].item, Item::Par(_)));
-            // «де …» і примітки стандарт друкує без відступу (окремі правила)
-            let note = p.head.trim_start().starts_with("Примітк");
-            if starts_with_where(&p.head) || note || !self.locs[i].is_some() {
-                continue;
-            }
-            if !p.all && after_block && d > 0.0 && first_after_block.is_none() {
-                first_after_block = Some(i);
-            }
-            let effective = if !p.all && after_block { 0.0 } else { p.indent };
-            // Перший абзац після блоку з `all: false` має окреме зауваження вище
-            if d > 0.0 && (effective - d).abs() > 0.5 && (p.all || !after_block) {
-                odd.push((i, effective));
-            }
-        }
-        if let Some(i) = first_after_block {
-            let loc = self.loc(i);
-            self.add(
-                "par-indent",
-                loc,
-                "перший абзац після заголовка, рисунка чи переліку без відступу: задайте `first-line-indent: (amount: …, all: true)`".into(),
-            );
-        }
-        for (i, effective) in odd {
-            let loc = self.loc(i);
-            self.add(
-                "par-indent",
-                loc,
-                format!(
-                    "абзацний відступ {}, а в решті тексту {}",
-                    Self::mm(effective),
-                    Self::mm(d)
-                ),
-            );
-        }
+        // Абзацний відступ, кегль, інтервал і шрифт абзаців основного тексту
+        // перевіряє статика: тут лише те, чого з коду не видно
 
-        // Кегль, інтервал, примітки
-        let mut size_bad = Vec::new();
-        let mut spacing_bad = Vec::new();
+        // Примітки (7.8.3)
         for &i in &pars {
             let Item::Par(p) = &self.e[i].item else {
                 continue;
             };
             let k = p.pitch / (SINGLE * p.size);
-            if p.head.trim_start().starts_with("Примітк") {
-                if (p.size - 12.0).abs() > 0.05 || !(0.85..=1.25).contains(&k) {
-                    let loc = self.loc(i);
-                    self.add(
-                        "note-size",
-                        loc,
-                        format!(
-                            "примітку набрано кеглем {} через {} інтервалу, має бути кеглем 12 через один",
-                            fmt_pt(p.size),
-                            fmt_num(k)
-                        ),
-                    );
-                }
-                continue;
-            }
-            if (p.size - 14.0).abs() > 0.05 {
-                size_bad.push((i, p.size));
-            }
-            if !(1.35..=2.2).contains(&k) {
-                spacing_bad.push((i, k, p.pitch));
+            if p.head.trim_start().starts_with("Примітк")
+                && ((p.size - 12.0).abs() > 0.05 || !(0.85..=1.25).contains(&k))
+            {
+                let loc = self.loc(i);
+                self.add(
+                    "note-size",
+                    loc,
+                    format!(
+                        "примітку набрано кеглем {} через {} інтервалу, має бути кеглем 12 через один",
+                        fmt_pt(p.size),
+                        fmt_num(k)
+                    ),
+                );
             }
         }
-        self.report_spread(
-            "font-size",
-            size_bad
-                .into_iter()
-                .map(|(i, s)| (i, format!("абзац кеглем {}, має бути 14", fmt_pt(s))))
-                .collect(),
-            (total, "абзаців"),
-            Place::Set("text", &["size"]),
-            "основний текст набрано не кеглем 14",
-        );
-        self.report_spread(
-            "line-spacing",
-            spacing_bad
-                .into_iter()
-                .map(|(i, k, pitch)| {
-                    (
-                        i,
-                        format!(
-                            "абзац через {} інтервалу (крок рядків {}), має бути 1,5–2",
-                            fmt_num(k),
-                            fmt_pt(pitch)
-                        ),
-                    )
-                })
-                .collect(),
-            (total, "абзаців"),
-            Place::Set("par", &["leading", "spacing"]),
-            "основний текст набрано не через 1,5–2 міжрядкові інтервали",
-        );
-
         // Прогони тексту з відхиленнями: шрифт, кегль, накреслення
         let mut family = Vec::new();
         let mut sizes = Vec::new();
@@ -1933,15 +1786,6 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     let shown = quote(&p.head);
-                    if p.font != "times new roman" {
-                        family.push((
-                            i,
-                            format!(
-                                "абзац {shown} шрифтом «{}», має бути Times New Roman",
-                                p.font
-                            ),
-                        ));
-                    }
                     if p.kind != "b" && (p.style != "normal" || !p.black) {
                         let what = if p.style != "normal" {
                             "курсивом"
@@ -2163,8 +2007,8 @@ impl<'a> Checker<'a> {
                     loc,
                     format!(
                         "позиції переліку починаються за {} від берега, а абзацний відступ — {}",
-                        Self::mm(marker_x - left),
-                        Self::mm(self.indent)
+                        mm(marker_x - left),
+                        mm(self.indent)
                     ),
                 );
             }
@@ -2418,16 +2262,6 @@ fn list_pages(pages: &[usize]) -> String {
     } else {
         shown.join(", ")
     }
-}
-
-fn fmt_pt(v: f64) -> String {
-    fmt_num(v) + " pt"
-}
-
-fn fmt_num(v: f64) -> String {
-    let s = format!("{:.2}", v);
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    s.replace('.', ",")
 }
 
 #[cfg(test)]

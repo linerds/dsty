@@ -6,11 +6,18 @@ use std::path::{Path, PathBuf};
 
 use dsty::lint::{self, Diagnostic, Options, Report};
 
+/// Мінішаблон (`tests/fixtures`): лежить у корені кожного проєкту тестів.
+const FIXTURES: &[(&str, &str)] = &[
+    ("tpl.typ", include_str!("fixtures/tpl.typ")),
+    ("style.typ", include_str!("fixtures/style.typ")),
+];
+
 /// Перевіряє проєкт з файлів у пам'яті; main є першим файлом.
 fn run_files(files: &[(&str, &str)], options: &Options) -> Report {
     let root = PathBuf::from("/project");
-    let map: HashMap<PathBuf, String> = files
+    let map: HashMap<PathBuf, String> = FIXTURES
         .iter()
+        .chain(files)
         .map(|(p, t)| (root.join(p), (*t).to_owned()))
         .collect();
     let load = |path: &Path| map.get(path).cloned();
@@ -37,7 +44,10 @@ fn fixed(src: &str) -> String {
     lint::apply_fixes(src, &diags).0
 }
 
-const DSTU: &str = "#show: style.dstu\n";
+/// Обгортки мінішаблону.
+const TPL: &str = "#import \"/tpl.typ\": *\n";
+/// Документ за мінішаблоном.
+const DSTU: &str = "#import \"/tpl.typ\": *\n#show: style.dstu\n";
 
 #[test]
 fn headings() {
@@ -98,6 +108,7 @@ fn single_subheading() {
 #[test]
 fn figures() {
     let src = "\
+#import \"/tpl.typ\": *
 Див. @ok[], @lower[] і @tbl[].
 
 #figure(rect(), caption: [Добрий]) <ok>
@@ -114,7 +125,7 @@ fn figures() {
     let diags = run(src);
     let found: Vec<_> = diags.iter().map(|d| (d.rule, pointed(src, d))).collect();
     // Перше посилання стає пов'язаним місцем
-    assert_eq!(diags[2].related[0].1.line, 6);
+    assert_eq!(diags[2].related[0].1.line, 7);
     assert_eq!(
         found,
         [
@@ -244,13 +255,13 @@ fn formula_where() {
 
 #[test]
 fn keywords() {
-    let src = "#abstract(w, keywords: (\"один\", \"два\"))[Текст.]\n";
-    assert_eq!(rules(src), ["keywords-count"]);
+    let src = format!("{TPL}#abstract(w, keywords: (\"один\", \"два\"))[Текст.]\n");
+    assert_eq!(rules(&src), ["keywords-count"]);
     // Рецепт: `abstract: (keywords: …)` у `show`
-    let src = "#show: coursework.with(abstract: (keywords: (\"a\",), text: []))\n";
-    assert_eq!(rules(src), ["keywords-count"]);
-    let src = "#abstract(w, keywords: (\"a\", \"b\", \"c\", \"d\", \"e\"))[Текст.]\n";
-    assert!(rules(src).is_empty());
+    let src = format!("{TPL}#show: coursework.with(abstract: (keywords: (\"a\",), text: []))\n");
+    assert_eq!(rules(&src), ["keywords-count"]);
+    let src = format!("{TPL}#abstract(w, keywords: (\"a\", \"b\", \"c\", \"d\", \"e\"))[Текст.]\n");
+    assert!(rules(&src).is_empty());
 }
 
 #[test]
@@ -267,9 +278,14 @@ fn appendices() {
 #[test]
 fn appendices_from_recipe_and_include() {
     // Рецепт друкує додатки в кінці, хоч вони в аргументах на початку
-    let main = "#show: coursework.with(bib-path: path(\"b.yml\"), appendices: include \"app.typ\")\n= Вступ\nКод у @code[].\n";
+    let main = format!(
+        "{TPL}#show: coursework.with(bib-path: path(\"b.yml\"), appendices: include \"app.typ\")\n= Вступ\nКод у @code[].\n"
+    );
     let app = "= Код програми <code>\nТекст.\n";
-    let report = run_files(&[("main.typ", main), ("app.typ", app)], &Options::default());
+    let report = run_files(
+        &[("main.typ", &main), ("app.typ", app)],
+        &Options::default(),
+    );
     let found: Vec<_> = report.diagnostics.iter().map(|d| d.rule).collect();
     // `= Вступ` нумерується (шаблон), а додаток іде після переліку джерел
     assert_eq!(found, ["heading-numbered"]);
@@ -278,8 +294,10 @@ fn appendices_from_recipe_and_include() {
 
 #[test]
 fn dynamic_labels_are_not_guessed() {
-    let src = "#show: style.appendices\n#for f in (\"a\", \"b\") [\n  #heading[Файл #f] #label(str(\"app_\" + f))\n]\n#heading[Файл] #label(\"lit\")\n";
-    assert_eq!(rules(src), ["appendix-unreferenced"]);
+    let src = format!(
+        "{TPL}#show: style.appendices\n#for f in (\"a\", \"b\") [\n  #heading[Файл #f] #label(str(\"app_\" + f))\n]\n#heading[Файл] #label(\"lit\")\n"
+    );
+    assert_eq!(rules(&src), ["appendix-unreferenced"]);
 }
 
 #[test]
@@ -493,8 +511,8 @@ fn manual_keywords() {
         ["keywords-count"]
     );
     // У масиві шаблону порядок не перевіряється: шаблон сортує сам
-    let src = "#abstract(w, keywords: (\"Я\", \"Б\", \"В\", \"Г\", \"Д\"))[Текст.]\n";
-    assert!(run_with(src, &["keywords-order"]).is_empty());
+    let src = format!("{TPL}#abstract(w, keywords: (\"Я\", \"Б\", \"В\", \"Г\", \"Д\"))[Текст.]\n");
+    assert!(run_with(&src, &["keywords-order"]).is_empty());
 }
 
 #[test]
@@ -717,7 +735,183 @@ fn ignore_comment_problems() {
     assert_eq!(fixed(src), "- Велика. // dstu-ignore: list-case\n");
 
     // Правила повної перевірки без компіляції не перевірялися: не зайві
-    assert!(rules("// dstu-ignore-file: page-size, heading-numbered\nТекст.\n").is_empty());
+    assert!(rules("// dstu-ignore-file: new-page, heading-numbered\nТекст.\n").is_empty());
     // Без переліку (усі правила) теж
     assert!(rules("Текст. // dstu-ignore\n").is_empty());
+}
+
+#[test]
+fn text_and_page_settings() {
+    let src = "#set page(paper: \"a5\", margin: 10mm)\n#set text(size: 12pt, lang: \"uk\")\n#set par(leading: 0.3em, first-line-indent: 5mm)\n= Огляд\nТекст.\n";
+    let options = Options {
+        enable: vec!["page-margins".into()],
+        ..Default::default()
+    };
+    let diags = run_files(&[("main.typ", src)], &options).diagnostics;
+    let found: Vec<_> = diags.iter().map(|d| (d.rule, pointed(src, d))).collect();
+    assert_eq!(
+        found,
+        [
+            ("page-size", "set page(paper: \"a5\", margin: 10mm)"),
+            ("page-margins", "set page(paper: \"a5\", margin: 10mm)"),
+            ("font-size", "set text(size: 12pt, lang: \"uk\")"),
+            ("font-family", "set text(size: 12pt, lang: \"uk\")"),
+            (
+                "line-spacing",
+                "set par(leading: 0.3em, first-line-indent: 5mm)"
+            ),
+            (
+                "par-indent",
+                "set par(leading: 0.3em, first-line-indent: 5mm)"
+            ),
+            (
+                "par-indent",
+                "set par(leading: 0.3em, first-line-indent: 5mm)"
+            ),
+        ],
+        "{diags:#?}"
+    );
+    assert!(diags[0].msg.contains("148 мм × 210 мм"));
+    assert!(diags[3].msg.contains("Libertinus Serif") && diags[3].msg.contains("типове"));
+    assert!(diags[5].msg.contains("5 мм"));
+    // Довжина без `all: true`: перший абзац після заголовка без відступу
+    assert!(diags[6].msg.contains("перший абзац після заголовка"));
+    assert!(fixed(src).contains("#set text(size: 14pt, lang: \"uk\")"));
+
+    // Правильні налаштування, зокрема через змінні й em
+    let src = "#let k = 1.25\n#set page(paper: \"a4\", margin: (top: 20mm, bottom: 20mm, left: 25mm, right: 10mm))\n#set text(size: 14pt, font: (\"Times New Roman\", \"Liberation Serif\"))\n#set par(leading: 0.95em, first-line-indent: (amount: k * 1cm, all: true))\n= Огляд\nТекст.\n";
+    assert!(
+        run_files(&[("main.typ", src)], &options)
+            .diagnostics
+            .is_empty()
+    );
+
+    // Фрагмент без жодних налаштувань: типові значення typst не перевіряються
+    assert!(rules("= Огляд\nТекст.\n").is_empty());
+    // Значення, якого з коду не видно, теж
+    assert!(rules("#set text(size: base)\n= Огляд\nТекст.\n").contains(&"font-family"));
+    assert!(!rules("#set text(size: base)\n= Огляд\nТекст.\n").contains(&"font-size"));
+}
+
+#[test]
+fn settings_from_template_file() {
+    let lib = "#let tpl(doc, size: 14pt) = {\n  set text(size: size, font: \"Times New Roman\")\n  set par(leading: 1em, first-line-indent: (amount: 1.25cm, all: true))\n  doc\n}\n";
+    let check = |main: &str| {
+        run_files(&[("main.typ", main), ("lib.typ", lib)], &Options::default()).diagnostics
+    };
+    assert!(check("#import \"lib.typ\": tpl\n#show: tpl\n= Огляд\nТекст.\n").is_empty());
+
+    let main = "#import \"lib.typ\": tpl\n#show: tpl.with(size: 12pt)\n= Огляд\nТекст.\n";
+    let diags = check(main);
+    assert_eq!(diags.len(), 1, "{diags:#?}");
+    assert_eq!(diags[0].rule, "font-size");
+    assert_eq!(pointed(main, &diags[0]), "show: tpl.with(size: 12pt)");
+    assert!(diags[0].msg.contains("шаблон, lib.typ"), "{}", diags[0].msg);
+    // Налаштування документа після шаблону діє поверх нього
+    let main = "#import \"lib.typ\": tpl\n#show: tpl.with(size: 12pt)\n#set text(size: 14pt)\n= Огляд\nТекст.\n";
+    assert!(check(main).is_empty());
+
+    // Обгортка з вмістом налаштовує лише його
+    let main = "#import \"lib.typ\": tpl\n#show: tpl\n= Огляд\nТекст.\n#text(size: 10pt)[\n  Дрібний текст.\n\n  Ще абзац.\n]\n";
+    let diags = check(main);
+    assert_eq!(diags.len(), 1, "{diags:#?}");
+    assert_eq!(diags[0].rule, "font-size");
+    assert!(pointed(main, &diags[0]).starts_with("text(size: 10pt)["));
+
+    // Шаблону з пакунка, якого немає, не простежити: нічого не відомо
+    let main = "#import \"@preview/no-such-package:0.1.0\": tpl\n#show: tpl\n= Огляд\nТекст.\n";
+    assert!(check(main).is_empty());
+}
+
+#[test]
+fn appendices_by_what_the_wrapper_does() {
+    let def = "#let appendices-style(body) = {\n  set heading(numbering: \"А.1\", supplement: [Додаток])\n  body\n}\n";
+    // Назва довільна: додатки видно з налаштувань обгортки
+    let src = format!(
+        "{def}Додатки: @b[], потім @a[].\n#show: appendices-style\n= Перший <a>\n= Другий <b>\n"
+    );
+    assert_eq!(rules(&src), ["appendix-order"]);
+    let src = format!(
+        "{def}Додатки: @b[], потім @a[].\n#appendices-style[\n= Перший <a>\n= Другий <b>\n]\n"
+    );
+    assert_eq!(rules(&src), ["appendix-order"]);
+    // Обгортка з назвою `appendices`, що додатків не налаштовує, ними не є
+    let src = "#let appendices(body) = body\nДодатки: @b[], потім @a[].\n#show: appendices\n= Перший <a>\n= Другий <b>\n";
+    assert!(rules(src).is_empty());
+}
+
+#[test]
+fn template_from_package() {
+    // SAFETY: змінну задають лише тести з пакунками, і завжди однаково
+    unsafe { std::env::set_var("TYPST_PACKAGE_PATH", "/packages") };
+    let manifest = "[package]\nname = \"tpl\"\nversion = \"0.1.0\"\nentrypoint = \"src/lib.typ\"\n";
+    let lib =
+        "#import \"/src/style.typ\"\n#let report(doc, ..args) = {\n  show: style.dstu\n  doc\n}\n";
+    let style = "#let dstu(it) = {\n  set page(paper: \"a4\")\n  set text(size: 13pt, font: \"Times New Roman\")\n  set par(leading: 0.95em, first-line-indent: (amount: 1.25cm, all: true))\n  it\n}\n#let appendices(it) = {\n  set heading(supplement: [Додаток])\n  it\n}\n";
+    let main = "#import \"@local/tpl:0.1.0\": *\n#show: report.with(..toml(\"doc.toml\"))\n= Огляд\nТекст.\n";
+    let report = run_files(
+        &[
+            ("main.typ", main),
+            ("doc.toml", "title = \"Звіт\"\n"),
+            ("/packages/local/tpl/0.1.0/typst.toml", manifest),
+            ("/packages/local/tpl/0.1.0/src/lib.typ", lib),
+            ("/packages/local/tpl/0.1.0/src/style.typ", style),
+        ],
+        &Options::default(),
+    );
+    let found: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|d| (d.rule, pointed(main, d)))
+        .collect();
+    assert_eq!(
+        found,
+        [("font-size", "show: report.with(..toml(\"doc.toml\"))")]
+    );
+    assert!(report.diagnostics[0].msg.contains("style.typ"));
+    // Файли пакунка не стають файлами документа
+    assert_eq!(report.files.len(), 1);
+}
+
+#[test]
+fn wrappers_are_recognized_by_what_they_build() {
+    // Обгортка з міткою, обчисленою зі шляху: рисунок і його мітка видно
+    let lib = r#"#let img(path, caption, ..sink) = {
+  let name = path.split(".").first().split("/").last().replace(" ", "_")
+  [#figure(image(path, ..sink.named()), caption: caption) #label(name)]
+}
+#let plot(data, title) = figure(rect(), caption: title)
+"#;
+    let main = "#import \"lib.typ\": *\nНа @scheme[рисунку] схема.\n#img(\"figures/scheme.png\", \"Схема\")\n#img(\"figures/other.png\", \"інший\")\n#plot((1, 2), [Графік])\n";
+    let report = run_files(&[("main.typ", main), ("lib.typ", lib)], &Options::default());
+    let found: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|d| (d.rule, pointed(main, d)))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("caption-case", "інший"),
+            ("figure-unreferenced", "інший"),
+            ("figure-unreferenced", "Графік"),
+        ],
+        "{:#?}",
+        report.diagnostics
+    );
+
+    // Без визначення обгортки нічого не вгадується: текст перевіряється, але
+    // ні рисунка, ні нумерації заголовків не видно
+    let src = "#show: style.dstu\n= Вступ\n#fig(path(\"a.png\"), [Обгортка], label: <x>)\n";
+    assert!(rules(src).is_empty(), "{:?}", rules(src));
+}
+
+#[test]
+fn appendices_by_numbering_and_heading_show() {
+    // Нумерація функцією, що дає першому заголовку «А»
+    let src = "#let letters = \"АБВГ\".clusters()\n#let app(body) = {\n  set heading(numbering: (i, ..n) => letters.at(i - 1))\n  body\n}\nДодатки: @b[], потім @a[].\n#show: app\n= Перший <a>\n= Другий <b>\n";
+    assert_eq!(rules(src), ["appendix-order"]);
+    // `show heading`, що друкує «ДОДАТОК»
+    let src = "#let app(body) = {\n  set heading(numbering: \"1\")\n  show heading: it => [ДОДАТОК #it.body]\n  body\n}\nДодатки: @b[], потім @a[].\n#show: app\n= Перший <a>\n= Другий <b>\n";
+    assert_eq!(rules(src), ["appendix-order"]);
 }

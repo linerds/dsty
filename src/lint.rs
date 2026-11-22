@@ -168,7 +168,7 @@ pub fn check_full(
         found.extend(
             crate::full::check(&doc, facts, &active)
                 .into_iter()
-                .filter(|f| !static_lines.contains(&line(f))),
+                .filter(|f| f.rule.split || !static_lines.contains(&line(f))),
         );
     }
 
@@ -676,8 +676,7 @@ impl Suppressions {
                     ));
                     continue;
                 };
-                let checked =
-                    active(known.code) && (with_facts || (!known.full && known.probes == 0));
+                let checked = active(known.code) && (with_facts || (!known.full && !known.partial));
                 if !e.used[k] && checked && unused_on {
                     out.push(Found::new(
                         rule("ignore-unused"),
