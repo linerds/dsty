@@ -9,9 +9,10 @@
 Готовий бінарник для Linux (x86_64, aarch64, статичний) і macOS (Intel, Apple Silicon) -- в архіві на сторінці релізів: розпакуйте й покладіть `dsty` у теку з `PATH`.
 
 ```sh
-nix profile install .              # з теки репозиторію
-nix run . -- check src/main.typ    # без встановлення
-cargo install --path .             # без Nix (Rust 1.92+)
+cargo install --git https://github.com/linerds/dsty                       # Rust 1.92+
+mise use -g 'github:linerds/dsty[prerelease=true,minimum_release_age=0]'  # архів з релізу
+nix profile install github:linerds/dsty                                   # зібрати з коду
+nix run github:linerds/dsty -- check src/main.typ                         # без встановлення
 ```
 
 Для повної перевірки потрібен `typst` 0.15+ у `PATH` (старіші версії працюють через `typst query`, повільніше). Пакунки typst шукає як звичайно, тож `TYPST_PACKAGE_PATH` від mise чи direnv має бути в середовищі, з якого запущено dsty.
