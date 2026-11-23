@@ -32,6 +32,27 @@ fn rules(src: &str) -> Vec<&'static str> {
     run(src).iter().map(|d| d.rule).collect()
 }
 
+/// Правила оформлення: у тестових документах без повного шаблону їх дають
+/// типові значення typst.
+const LOOKS: &[&str] = &[
+    "font-size",
+    "font-family",
+    "page-number",
+    "new-page",
+    "appendix-letter",
+    "heading-style",
+    "heading-indent",
+    "heading-hyphen",
+];
+
+/// Правила, крім оформлення.
+fn content_rules(src: &str) -> Vec<&'static str> {
+    rules(src)
+        .into_iter()
+        .filter(|r| !LOOKS.contains(r))
+        .collect()
+}
+
 /// Текст, на який вказує зауваження.
 fn pointed<'a>(src: &'a str, d: &Diagnostic) -> &'a str {
     &src[d.range.clone()]
@@ -207,7 +228,7 @@ fn multiline_item_points_at_the_problem() {
 
 #[test]
 fn list_period_in_the_middle_and_semicolon_at_the_end() {
-    let src = "Умови:\n+ перша;\n+ друга.\n+ третя;\n\nВкладений:\n- зовнішній:\n  + внутрішній;\n  + останній;\n- кінець.\n";
+    let src = "Умови:\n+ перша;\n+ друга.\n+ третя;\n\nВкладений:\n- зовнішній:\n  + внутрішній;\n  + останній;\n- кінець.\n\nПозицію 3) перевіряють першою.\n";
     let diags = run(src);
     let found: Vec<_> = diags.iter().map(|d| (d.rule, pointed(src, d))).collect();
     assert_eq!(found, [("list-punct", "друга."), ("list-punct", "третя;")]);
@@ -217,8 +238,33 @@ fn list_period_in_the_middle_and_semicolon_at_the_end() {
     assert!(out.contains("+ останній;\n"), "{out}");
 
     // Дві помилки в одній позиції дають два зауваження; після кількох речень теж «;»
-    let src = "Кроки:\n+ Відкрито вікно.\n+ натиснуто кнопку. Далі X.\n+ кінець.\n";
+    let src = "Кроки:\n- Відкрито вікно.\n- натиснуто кнопку. Далі X.\n- кінець.\n";
     assert_eq!(rules(src), ["list-case", "list-punct", "list-punct"]);
+}
+
+#[test]
+fn numbered_list_without_references() {
+    // 7.7.2: нумерований перелік без посилань на позиції позначають «–»
+    let src = "Завдання:\n+ завдання 1: розробити;\n+ завдання 2: перевірити.\n";
+    let diags = run(src);
+    let found: Vec<_> = diags.iter().map(|d| (d.rule, pointed(src, d))).collect();
+    assert_eq!(found, [("list-unreferenced", "+")], "{diags:?}");
+    assert_eq!(
+        fixed(src),
+        "Завдання:\n- завдання 1: розробити;\n- завдання 2: перевірити.\n"
+    );
+    // Посилання на позицію, маркований і вкладений перелік: мовчить
+    for ok in [
+        "Кроки:\n+ перший;\n+ другий.\n\nУ пункті 2) описано друге.\n",
+        "Кроки:\n- перший;\n- другий.\n",
+        "Кроки:\n+ перший:\n  - а;\n  - б.\n+ другий.\n",
+    ] {
+        assert!(
+            !rules(ok).contains(&"list-unreferenced"),
+            "{ok}: {:?}",
+            run(ok)
+        );
+    }
 }
 
 #[test]
@@ -259,7 +305,7 @@ fn keywords() {
     assert_eq!(rules(&src), ["keywords-count"]);
     // Рецепт: `abstract: (keywords: …)` у `show`
     let src = format!("{TPL}#show: coursework.with(abstract: (keywords: (\"a\",), text: []))\n");
-    assert_eq!(rules(&src), ["keywords-count"]);
+    assert_eq!(content_rules(&src), ["keywords-count"]);
     let src = format!("{TPL}#abstract(w, keywords: (\"a\", \"b\", \"c\", \"d\", \"e\"))[Текст.]\n");
     assert!(rules(&src).is_empty());
 }
@@ -297,7 +343,7 @@ fn dynamic_labels_are_not_guessed() {
     let src = format!(
         "{TPL}#show: style.appendices\n#for f in (\"a\", \"b\") [\n  #heading[Файл #f] #label(str(\"app_\" + f))\n]\n#heading[Файл] #label(\"lit\")\n"
     );
-    assert_eq!(rules(&src), ["appendix-unreferenced"]);
+    assert_eq!(content_rules(&src), ["appendix-unreferenced"]);
 }
 
 #[test]
@@ -397,9 +443,9 @@ fn fix_all_repeats_until_stable() {
     let fixed = lint::fix_all(&root, &main, &load, &Options::default(), None).unwrap();
     assert_eq!(
         fixed.files[&main],
-        "Визначити:\n1. швидкість потоку;\n2. обрати модуляцію;\n3. розробити схему.\n"
+        "Визначити:\n- швидкість потоку;\n- обрати модуляцію;\n- розробити схему.\n"
     );
-    assert_eq!(fixed.count, 4);
+    assert_eq!(fixed.count, 5);
 }
 
 fn run_with(src: &str, enable: &[&str]) -> Vec<Diagnostic> {
@@ -625,7 +671,7 @@ $ x = 1 $ <e>
     assert!(out.contains("Згідно з @e[формулою]"), "{out}");
     // Власний підпис з малої літери чи власне show-правило ref не перевіряються
     let src = "#set figure(supplement: [рис.])\nНа @f.\n#figure(rect(), caption: [Схема]) <f>\n";
-    assert!(rules(src).is_empty());
+    assert!(!rules(src).contains(&"ref-supplement"));
     let src = "#show ref: it => it\nНа @f.\n#figure(rect(), caption: [Схема]) <f>\n";
     assert!(rules(src).is_empty());
 }
@@ -681,6 +727,12 @@ fn formula_comma() {
     }
     // Проміжок чи розрив сторінки не вважаються текстом
     assert_eq!(rules("$ a = b $\n#v(1em)\n$ c = d $\n"), ["formula-comma"]);
+    // Формули в позиції переліку: поспіль лише в тій самій позиції
+    let src = "Маємо:\n- струм:\n  $ a = b $ $ c = d $\n- напруга:\n  $ e = f $\n";
+    let diags = run(src);
+    let found: Vec<_> = diags.iter().map(|d| (d.rule, pointed(src, d))).collect();
+    assert_eq!(found, [("formula-comma", "$")], "{diags:?}");
+    assert_eq!(diags[0].range.start, src.find("b $").unwrap() + 2);
 }
 
 #[test]
@@ -735,7 +787,7 @@ fn ignore_comment_problems() {
     assert_eq!(fixed(src), "- Велика. // dstu-ignore: list-case\n");
 
     // Правила повної перевірки без компіляції не перевірялися: не зайві
-    assert!(rules("// dstu-ignore-file: new-page, heading-numbered\nТекст.\n").is_empty());
+    assert!(rules("// dstu-ignore-file: heading-orphan, heading-numbered\nТекст.\n").is_empty());
     // Без переліку (усі правила) теж
     assert!(rules("Текст. // dstu-ignore\n").is_empty());
 }
@@ -754,8 +806,11 @@ fn text_and_page_settings() {
         [
             ("page-size", "set page(paper: \"a5\", margin: 10mm)"),
             ("page-margins", "set page(paper: \"a5\", margin: 10mm)"),
+            ("page-number", "set page(paper: \"a5\", margin: 10mm)"),
             ("font-size", "set text(size: 12pt, lang: \"uk\")"),
             ("font-family", "set text(size: 12pt, lang: \"uk\")"),
+            // Заголовок: 1,4 em від 12 pt
+            ("font-size", "set text(size: 12pt, lang: \"uk\")"),
             (
                 "line-spacing",
                 "set par(leading: 0.3em, first-line-indent: 5mm)"
@@ -772,14 +827,15 @@ fn text_and_page_settings() {
         "{diags:#?}"
     );
     assert!(diags[0].msg.contains("148 мм × 210 мм"));
-    assert!(diags[3].msg.contains("Libertinus Serif") && diags[3].msg.contains("типове"));
-    assert!(diags[5].msg.contains("5 мм"));
+    assert!(diags[4].msg.contains("Libertinus Serif") && diags[4].msg.contains("типове"));
+    assert!(diags[5].msg.contains("заголовки рівня 1") && diags[5].msg.contains("16,8"));
+    assert!(diags[7].msg.contains("5 мм"));
     // Довжина без `all: true`: перший абзац після заголовка без відступу
-    assert!(diags[6].msg.contains("перший абзац після заголовка"));
+    assert!(diags[8].msg.contains("перший абзац після заголовка"));
     assert!(fixed(src).contains("#set text(size: 14pt, lang: \"uk\")"));
 
     // Правильні налаштування, зокрема через змінні й em
-    let src = "#let k = 1.25\n#set page(paper: \"a4\", margin: (top: 20mm, bottom: 20mm, left: 25mm, right: 10mm))\n#set text(size: 14pt, font: (\"Times New Roman\", \"Liberation Serif\"))\n#set par(leading: 0.95em, first-line-indent: (amount: k * 1cm, all: true))\n= Огляд\nТекст.\n";
+    let src = "#let k = 1.25\n#set page(paper: \"a4\", margin: (top: 20mm, bottom: 20mm, left: 25mm, right: 10mm), numbering: \"1\", number-align: right + top)\n#set text(size: 14pt, font: (\"Times New Roman\", \"Liberation Serif\"))\n#set par(leading: 0.95em, first-line-indent: (amount: k * 1cm, all: true))\n#show heading: set text(size: 14pt)\n= Огляд\nТекст.\n";
     assert!(
         run_files(&[("main.typ", src)], &options)
             .diagnostics
@@ -795,7 +851,7 @@ fn text_and_page_settings() {
 
 #[test]
 fn settings_from_template_file() {
-    let lib = "#let tpl(doc, size: 14pt) = {\n  set text(size: size, font: \"Times New Roman\")\n  set par(leading: 1em, first-line-indent: (amount: 1.25cm, all: true))\n  doc\n}\n";
+    let lib = "#let tpl(doc, size: 14pt) = {\n  set page(numbering: \"1\", number-align: top + right)\n  set text(size: size, font: \"Times New Roman\")\n  set par(leading: 1em, first-line-indent: (amount: 1.25cm, all: true))\n  show heading: set text(size: 14pt)\n  doc\n}\n";
     let check = |main: &str| {
         run_files(&[("main.typ", main), ("lib.typ", lib)], &Options::default()).diagnostics
     };
@@ -830,14 +886,14 @@ fn appendices_by_what_the_wrapper_does() {
     let src = format!(
         "{def}Додатки: @b[], потім @a[].\n#show: appendices-style\n= Перший <a>\n= Другий <b>\n"
     );
-    assert_eq!(rules(&src), ["appendix-order"]);
+    assert_eq!(content_rules(&src), ["appendix-order"]);
     let src = format!(
         "{def}Додатки: @b[], потім @a[].\n#appendices-style[\n= Перший <a>\n= Другий <b>\n]\n"
     );
-    assert_eq!(rules(&src), ["appendix-order"]);
+    assert_eq!(content_rules(&src), ["appendix-order"]);
     // Обгортка з назвою `appendices`, що додатків не налаштовує, ними не є
     let src = "#let appendices(body) = body\nДодатки: @b[], потім @a[].\n#show: appendices\n= Перший <a>\n= Другий <b>\n";
-    assert!(rules(src).is_empty());
+    assert!(content_rules(src).is_empty());
 }
 
 #[test]
@@ -864,9 +920,11 @@ fn template_from_package() {
         .iter()
         .map(|d| (d.rule, pointed(main, d)))
         .collect();
+    // Кегль основного тексту й заголовків (1,4 em від 13 pt), номери сторінок
+    let at = "show: report.with(..toml(\"doc.toml\"))";
     assert_eq!(
         found,
-        [("font-size", "show: report.with(..toml(\"doc.toml\"))")]
+        [("font-size", at), ("font-size", at), ("page-number", at)]
     );
     assert!(report.diagnostics[0].msg.contains("style.typ"));
     // Файли пакунка не стають файлами документа
@@ -910,8 +968,431 @@ fn wrappers_are_recognized_by_what_they_build() {
 fn appendices_by_numbering_and_heading_show() {
     // Нумерація функцією, що дає першому заголовку «А»
     let src = "#let letters = \"АБВГ\".clusters()\n#let app(body) = {\n  set heading(numbering: (i, ..n) => letters.at(i - 1))\n  body\n}\nДодатки: @b[], потім @a[].\n#show: app\n= Перший <a>\n= Другий <b>\n";
-    assert_eq!(rules(src), ["appendix-order"]);
+    assert_eq!(content_rules(src), ["appendix-order"]);
     // `show heading`, що друкує «ДОДАТОК»
     let src = "#let app(body) = {\n  set heading(numbering: \"1\")\n  show heading: it => [ДОДАТОК #it.body]\n  body\n}\nДодатки: @b[], потім @a[].\n#show: app\n= Перший <a>\n= Другий <b>\n";
-    assert_eq!(rules(src), ["appendix-order"]);
+    assert_eq!(content_rules(src), ["appendix-order"]);
+}
+
+/// Зауваження до оформлення елементів (правило, текст, на який вказує).
+fn looks_of(src: &str, enable: &[&str]) -> Vec<(&'static str, String)> {
+    let options = Options {
+        enable: enable.iter().map(|s| (*s).to_owned()).collect(),
+        ..Default::default()
+    };
+    run_files(&[("main.typ", src)], &options)
+        .diagnostics
+        .iter()
+        .map(|d| (d.rule, src[d.range.clone()].to_owned()))
+        .collect()
+}
+
+#[test]
+fn appearance_from_template() {
+    // Мінішаблон оформлює все за стандартом
+    let body = "#heading(numbering: none)[Вступ]\nТекст вступу.\n\n= Розділ\nТекст розділу:\n- перший;\n- другий.\n\n+ один;\n+ два.\n\nПозиція 2) головна.\n\n== Підрозділ\nТекст#footnote[Виноска.] на @f[рисунку].\n#figure(rect(), caption: [Схема]) <f>\n== Другий\nТекст.\n";
+    let ok = format!("{DSTU}{body}");
+    assert!(
+        looks_of(&ok, &["list-indent", "caption-position"]).is_empty(),
+        "{:?}",
+        looks_of(&ok, &[])
+    );
+
+    // Кожне налаштування документа після шаблону — одне зауваження на ньому
+    let cases: &[(&str, &str)] = &[
+        ("#set list(marker: [•])", "list-marker"),
+        ("#set enum(numbering: \"1.\")", "list-marker"),
+        ("#set heading(numbering: \"1.1.\")", "heading-number-format"),
+        ("#set heading(numbering: \"I.1\")", "heading-number-format"),
+        ("#set figure.caption(separator: [: ])", "caption-separator"),
+        ("#set figure(supplement: [Рис.])", "caption-supplement"),
+        ("#set figure(numbering: \"1.\")", "object-numbering"),
+        ("#set footnote(numbering: \"1\")", "footnote-numbering"),
+        (
+            "#set footnote.entry(separator: line(length: 60mm))",
+            "footnote-separator",
+        ),
+        ("#show footnote.entry: set text(size: 14pt)", "font-size"),
+        ("#set page(number-align: center + bottom)", "page-number"),
+        ("#set page(numbering: none)", "page-number"),
+        ("#show heading: set text(hyphenate: true)", "heading-hyphen"),
+        ("#show heading: set text(font: \"Arial\")", "font-family"),
+        (
+            "#show heading: set text(weight: \"regular\")",
+            "heading-style",
+        ),
+        ("#set text(style: \"italic\")", "font-style"),
+    ];
+    for (set, rule) in cases {
+        let src = format!("{DSTU}{set}\n{body}");
+        let found = looks_of(&src, &["font-style"]);
+        assert!(
+            found.len() == 1 && found[0].0 == *rule && set.contains(found[0].1.as_str()),
+            "{set}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn appearance_from_typst_defaults() {
+    // Документ з налаштуваннями тексту, але без оформлення елементів
+    let src = "#set text(lang: \"uk\", size: 14pt, font: \"Times New Roman\")\n#set par(leading: 0.95em, first-line-indent: (amount: 1.25cm, all: true), justify: true)\n#set heading(numbering: \"1.1\")\nТитульний аркуш.\n= Розділ\nТекст розділу:\n- перший;\n- другий.\n\n== Підрозділ\nТекст#footnote[Виноска.] на @f[рисунку] і в @t[таблиці].\n#figure(rect(), caption: [Схема]) <f>\n#figure(table[x], caption: [Дані]) <t>\n== Другий\nТекст.\n#heading(numbering: none)[Висновки]\nТекст.\n";
+    let mut found: Vec<&str> = looks_of(src, &["caption-position", "list-indent"])
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    assert_eq!(
+        found,
+        [
+            "caption-position",
+            "caption-separator",
+            "font-size",
+            "footnote-numbering",
+            "footnote-separator",
+            "heading-hyphen",
+            "heading-indent",
+            "heading-style",
+            "list-indent",
+            "list-marker",
+            "new-page",
+            "page-number",
+        ]
+    );
+    let diags = run(src);
+    let msg = |rule: &str, part: &str| diags.iter().any(|d| d.rule == rule && d.msg.contains(part));
+    assert!(msg("caption-separator", "двокрапка «:»"));
+    // Типові береги А4 — по 25 мм: 30 % від 160 мм
+    assert!(msg("footnote-separator", "48 мм"));
+    assert!(msg("font-size", "текст виносок набрано кеглем 11,9"));
+    assert!(msg("font-size", "заголовки рівня 1 набрано кеглем 19,6"));
+    assert!(msg("new-page", "«Висновки»"));
+    assert!(msg("page-number", "не пронумеровано"));
+}
+
+#[test]
+fn appearance_of_headings_from_show_rules() {
+    let tpl = |show: &str| {
+        format!(
+            "#set text(lang: \"uk\", size: 14pt, font: \"Times New Roman\", hyphenate: false)\n#set par(leading: 0.95em, first-line-indent: (amount: 1.25cm, all: true))\n#set page(numbering: \"1\", number-align: top + right)\n#set heading(numbering: \"1.1\")\n{show}\n= Розділ\nТекст.\n== Підрозділ\nТекст.\n== Другий\nТекст.\n"
+        )
+    };
+    // Як у шаблонах: великі літери, відступ підзаголовків з `h(…)` чи `pad`
+    for show in [
+        "#show heading: it => { set text(size: 14pt); if it.level == 1 { pagebreak(weak: true); upper(it) } else { block[#h(1.25cm)#counter(heading).display(it.numbering) #it.body] } }",
+        "#show heading.where(level: 1): it => upper(it)\n#show heading: set text(size: 14pt)\n#show heading.where(level: 2): it => pad(left: 1.25cm, it)",
+    ] {
+        assert!(
+            rules(&tpl(show)).is_empty(),
+            "{show}: {:?}",
+            rules(&tpl(show))
+        );
+    }
+    // Не великими літерами, посередині
+    let src = tpl("#show heading: set text(size: 14pt)\n#show heading: it => align(center, it)");
+    let found: Vec<_> = looks_of(&src, &[]).into_iter().map(|(r, _)| r).collect();
+    assert_eq!(found, ["heading-style", "heading-indent"]);
+    // Show-функція, якої не обчислити: оформлення не видно, тож мовчимо
+    let src =
+        tpl("#show heading: it => context { if here().page() > 1 { upper(it) } else { it } }");
+    assert!(rules(&src).is_empty(), "{:?}", rules(&src));
+}
+
+#[test]
+fn appearance_of_formulas() {
+    let base = format!(
+        "{DSTU}= Розділ\nЗа @a[формулою] маємо:\n$ a = b $ <a>\n#par(first-line-indent: 0pt)[де $a$ -- величина.]\n"
+    );
+    assert!(rules(&base).is_empty(), "{:?}", rules(&base));
+    let with = |set: &str| {
+        format!(
+            "{DSTU}{set}\n= Розділ\nЗа @a[формулою] маємо:\n$ a = b $ <a>\n$ c = d $ <c>\nде $a$ -- величина.\n"
+        )
+    };
+    let found: Vec<_> = looks_of(&with("#set math.equation(numbering: \"1\")"), &[])
+        .into_iter()
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (
+                "formula-numbering",
+                "set math.equation(numbering: \"1\")".to_owned()
+            ),
+            ("formula-comma", "$".to_owned()),
+            ("formula-numbering", "$ c = d $".to_owned()),
+            ("formula-where-indent", "де $a$ -- величина.".to_owned()),
+        ]
+    );
+    let found: Vec<_> = looks_of(
+        &with("#set math.equation(numbering: \"(1)\")\n#show math.equation: set align(left)"),
+        &[],
+    )
+    .into_iter()
+    .map(|(r, _)| r)
+    .collect();
+    assert!(found.contains(&"formula-center"), "{found:?}");
+    // `#par(first-line-indent: 0pt)[де …]` і `\` перед «де» статика не вважає відступом
+    let src = format!(
+        "{DSTU}= Розділ\nЗа формулою:\n$ a = b $\n#par(first-line-indent: 0pt)[де $a$ -- величина.]\n"
+    );
+    assert!(!rules(&src).contains(&"formula-where-indent"));
+}
+
+/// Що лише недавно бачила тільки повна перевірка: `context`, лічильники,
+/// show-функції, що друкують частини елемента, колонтитули, текст у рядку.
+#[test]
+fn appearance_beyond_set_rules() {
+    let tpl = "#set text(lang: \"uk\", size: 14pt, font: \"Times New Roman\", hyphenate: false)\n#set par(leading: 0.95em, first-line-indent: (amount: 1.25cm, all: true))\n#set page(numbering: \"1\", number-align: top + right)\n#set heading(numbering: \"1.1\")\n#show heading: set text(size: 14pt)\n#show heading.where(level: 1): it => { pagebreak(weak: true); upper(it) }\n#set figure.caption(separator: [ -- ])\n";
+    let fig = |n: &str| {
+        format!("На @f{n}[рисунку] схема.\n#figure(rect(), caption: [Схема {n}]) <f{n}>\n")
+    };
+    let chapters = |reset: &str| {
+        format!(
+            "{tpl}#set figure(numbering: i => context numbering(\"1.1\", counter(heading).get().at(0), i))\n{reset}= Перший\nТекст.\n{}{}= Другий\nТекст.\n{}",
+            fig("1"),
+            fig("2"),
+            fig("3")
+        )
+    };
+    // Номер у межах розділу без скидання лічильника: «2.3» замість «2.1»
+    let found = looks_of(&chapters(""), &[]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "object-numbering");
+    assert!(
+        run(&chapters(""))
+            .iter()
+            .any(|d| d.msg.contains("«2.3», за порядком має бути «2.1»"))
+    );
+    let reset = "#show heading.where(level: 1): it => { counter(figure.where(kind: image)).update(0); it }\n";
+    assert!(
+        looks_of(&chapters(reset), &[]).is_empty(),
+        "{:?}",
+        looks_of(&chapters(reset), &[])
+    );
+
+    // Show-правило прибирає номер у формул без посилань
+    let eq = format!(
+        "{tpl}#set math.equation(numbering: \"(1)\")\n#show math.equation.where(block: true): it => {{ if it.numbering == none {{ return it }}; context {{ if it.has(\"label\") and query(ref.where(target: it.label)).len() > 0 {{ return it }}; math.equation(it.body, block: true, numbering: none) }} }}\n= Розділ\nЗа @a[формулою] маємо:\n$ a = b, $ <a>\n$ c = d $\n#par(first-line-indent: 0pt)[де $a$ -- величина.]\n"
+    );
+    assert!(looks_of(&eq, &[]).is_empty(), "{:?}", looks_of(&eq, &[]));
+
+    // Фігуру друкує show-функція: назва таблиці над нею, з абзацного відступу
+    let table = |order: &str| {
+        format!(
+            "{tpl}#show figure.where(kind: table): it => block({order})\n= Розділ\nУ @t[таблиці] дані.\n#figure(table[x], caption: [Дані]) <t>\n"
+        )
+    };
+    let above = table("[#h(1.25cm)#it.caption\\ #it.body]");
+    assert!(
+        looks_of(&above, &["caption-position"]).is_empty(),
+        "{:?}",
+        looks_of(&above, &["caption-position"])
+    );
+    let below = looks_of(&table("[#it.body #it.caption]"), &["caption-position"]);
+    assert!(
+        below.iter().any(|(r, _)| *r == "caption-position"),
+        "{below:?}"
+    );
+
+    // Вкладений перелік: `set` у show-функції зовнішнього
+    let lists = format!(
+        "{tpl}#set enum(numbering: \"а)\")\n#show enum: it => {{ set enum(numbering: \"1.\"); it }}\n= Розділ\nПерелік:\n+ перший:\n  + вкладений;\n  + другий;\n+ останній.\n"
+    );
+    let found = looks_of(&lists, &[]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        run(&lists)
+            .iter()
+            .any(|d| d.rule == "list-marker" && d.msg.contains("«1.»"))
+    );
+
+    // Номер сторінки у власному колонтитулі
+    let header = |align: &str| {
+        format!(
+            "{tpl}#set page(header: align({align}, context counter(page).display()))\n= Розділ\nТекст.\n"
+        )
+    };
+    assert!(
+        looks_of(&header("right"), &[]).is_empty(),
+        "{:?}",
+        looks_of(&header("right"), &[])
+    );
+    let found = looks_of(&header("center"), &[]);
+    assert!(
+        found
+            .iter()
+            .any(|(r, t)| *r == "page-number" && t.contains("header")),
+        "{found:?}"
+    );
+
+    // Лічильник виносок без скидання на кожній сторінці
+    let notes = format!(
+        "{tpl}#set footnote(numbering: \"1)\")\n#set footnote.entry(separator: line(length: 35mm))\n#show footnote.entry: set text(size: 12pt)\n= Розділ\nТекст#footnote[Перша.] і ще#footnote[Друга.].\n"
+    );
+    let found: Vec<_> = looks_of(&notes, &[]).into_iter().map(|(r, _)| r).collect();
+    assert_eq!(found, ["footnote-numbering"]);
+}
+
+#[test]
+fn inline_text_and_notes() {
+    let src = format!(
+        "{DSTU}= Розділ\nЗвичайний абзац, де #text(size: 10pt)[дрібний] текст і #text(font: \"Arial\")[інший] шрифт.\n\nПримітка. Примітка кеглем 14.\n"
+    );
+    let found = looks_of(&src, &[]);
+    assert_eq!(
+        found,
+        [
+            ("font-size", "text(size: 10pt)[дрібний]".to_owned()),
+            ("font-family", "text(font: \"Arial\")[інший]".to_owned()),
+            ("note-size", "Примітка. Примітка кеглем 14.".to_owned()),
+        ]
+    );
+    let src = format!(
+        "{DSTU}= Розділ\nТекст.\n#par(leading: 0.5em)[#text(size: 12pt)[Примітка. Правильна примітка.]]\n"
+    );
+    assert!(looks_of(&src, &[]).is_empty(), "{:?}", looks_of(&src, &[]));
+    // Курсив — лише з `enable: font-style`
+    let src = format!("{DSTU}= Розділ\nТекст з _курсивом_ у реченні.\n");
+    assert!(looks_of(&src, &[]).is_empty());
+    assert_eq!(
+        looks_of(&src, &["font-style"]),
+        [("font-style", "_курсивом_".to_owned())]
+    );
+    // `\` перед «де»: порожній рядок
+    let src = format!("{DSTU}= Розділ\nЗа формулою:\n$ a = b $\\\nде $a$ -- величина.\n");
+    let diags = run(&src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.rule == "formula-where-indent" && d.msg.contains("порожній рядок")),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn loop_over_known_array() {
+    // Цикл за відомим масивом друкує тіло для кожного значення
+    let src = "#for f in (\"перший\", \"другий\") [\n  == Пункт #f.\n  Текст.\n]\n";
+    let diags = run(src);
+    let periods: Vec<_> = diags
+        .iter()
+        .filter(|d| d.rule == "heading-period")
+        .map(|d| d.msg.clone())
+        .collect();
+    assert_eq!(periods.len(), 2, "{diags:?}");
+    assert!(periods[0].contains("«Пункт перший.»"), "{periods:?}");
+    assert!(periods[1].contains("«Пункт другий.»"), "{periods:?}");
+    // Масив, якого не видно: тіло один раз, змінної немає
+    let src = "#for f in sys.inputs.values() [\n  == Пункт #f.\n]\n";
+    let n = rules(src)
+        .iter()
+        .filter(|r| **r == "heading-period")
+        .count();
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn known_variable_in_text() {
+    let src = "#let name = \"Вступ\"\n= #name.\n";
+    let diags = run(src);
+    let d = diags
+        .iter()
+        .find(|d| d.rule == "heading-period")
+        .expect("heading-period");
+    assert!(d.msg.contains("«Вступ.»"), "{}", d.msg);
+}
+
+#[test]
+fn content_in_let_is_document_text() {
+    // Вміст з `#let`, який документ ставить сам, перевіряється там, де написаний
+    let body = "#let body = [\n= Розділ.\nПерелік:\n- Перший.\n]\n";
+    let same = format!("{body}#body\n");
+    let found = |files: &[(&str, &str)]| -> Vec<(String, &'static str)> {
+        let mut out: Vec<_> = run_files(files, &Options::default())
+            .diagnostics
+            .into_iter()
+            .filter(|d| matches!(d.rule, "heading-period" | "list-case"))
+            .map(|d| {
+                (
+                    d.path.file_name().unwrap().to_string_lossy().into_owned(),
+                    d.rule,
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    };
+    let expect = |file: &str| {
+        vec![
+            (file.to_owned(), "heading-period"),
+            (file.to_owned(), "list-case"),
+        ]
+    };
+    assert_eq!(found(&[("main.typ", &same)]), expect("main.typ"));
+    // Імпорт назви й доступ через модуль: зауваження у файлі, де вміст набрано
+    let main = "#import \"parts.typ\": body\n#body\n";
+    assert_eq!(
+        found(&[("main.typ", main), ("parts.typ", body)]),
+        expect("parts.typ")
+    );
+    let main = "#import \"parts.typ\"\n#parts.body\n";
+    assert_eq!(
+        found(&[("main.typ", main), ("parts.typ", body)]),
+        expect("parts.typ")
+    );
+    // Вміст, переданий шаблону, який його друкує
+    let tpl = "#let tpl(body: none, doc) = { doc; body }\n";
+    let main = "#import \"t.typ\": tpl\n#import \"parts.typ\": body\n#show: tpl.with(body: body)\nТекст.\n";
+    assert_eq!(
+        found(&[("main.typ", main), ("t.typ", tpl), ("parts.typ", body)]),
+        expect("parts.typ")
+    );
+    // Невикористаний вміст не друкується
+    assert!(found(&[("main.typ", body)]).is_empty());
+}
+
+#[test]
+fn loops_over_range_enumerate_and_dict() {
+    let captions = |src: &str| -> Vec<String> {
+        run(src)
+            .into_iter()
+            .filter(|d| d.rule == "figure-unreferenced")
+            .map(|d| d.msg)
+            .collect()
+    };
+    // `range`, число в тексті й обчислений рядок підпису
+    let src = "= Розділ\n#for i in range(1, 3) {\n  figure(rect(), caption: [Слайд #i])\n  figure(rect(), caption: \"Аркуш \" + str(i))\n}\n";
+    let c = captions(src);
+    for want in ["«Слайд 1»", "«Слайд 2»", "«Аркуш 1»", "«Аркуш 2»"] {
+        assert!(c.iter().any(|m| m.contains(want)), "{want}: {c:?}");
+    }
+    // `enumerate` з деструктуризацією
+    let src = "= Розділ\n#for (n, name) in (\"А\", \"Б\").enumerate(start: 1) [\n  #figure(rect(), caption: [#n. #name])\n]\n";
+    let c = captions(src);
+    assert!(c.iter().any(|m| m.contains("«1. А»")), "{c:?}");
+    assert!(c.iter().any(|m| m.contains("«2. Б»")), "{c:?}");
+    // Словник: пари (ключ, значення)
+    let src = "= Розділ\n#let parts = (вхід: 1, вихід: 2)\n#for (k, v) in parts [\n  #figure(rect(), caption: [#k #v])\n]\n";
+    let c = captions(src);
+    assert!(c.iter().any(|m| m.contains("«вхід 1»")), "{c:?}");
+    assert!(c.iter().any(|m| m.contains("«вихід 2»")), "{c:?}");
+}
+
+#[test]
+fn let_destructuring_and_calc() {
+    let src = "#let (a, .., z) = (\"Перший\", \"x\", \"Останній\")\n#let (name: n) = (name: \"Ім'я\")\n= #a.\n= #z.\n= #n.\n= Пункт #calc.max(2, 7).\n";
+    let periods: Vec<String> = run(src)
+        .into_iter()
+        .filter(|d| d.rule == "heading-period")
+        .map(|d| d.msg)
+        .collect();
+    for want in ["«Перший.»", "«Останній.»", "«Ім'я.»", "«Пункт 7.»"]
+    {
+        assert!(
+            periods.iter().any(|m| m.contains(want)),
+            "{want}: {periods:?}"
+        );
+    }
 }

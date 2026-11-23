@@ -102,13 +102,13 @@ fn page_text_and_headings() {
             ("page-number", "center + bottom"),
             ("font-family", "основний текст"),
             ("font-size", "основний текст"),
-            ("font-size", "заголовок «Вступ»"),
+            ("font-size", "заголовки рівня 1"),
             ("line-spacing", "основний текст"),
             ("par-indent", "5 мм"),
             ("par-indent", "перший абзац після заголовка"),
-            ("heading-style", "«Огляд» надруковано не великими"),
-            ("heading-number-format", "«2.1.»"),
-            ("heading-indent", "«Підрозділ огляду»"),
+            ("heading-style", "великими літерами"),
+            ("heading-number-format", "крапку не ставлять"),
+            ("heading-indent", "з абзацного відступу"),
             ("new-page", "«Висновки»"),
         ],
     );
@@ -180,7 +180,7 @@ $ c = d $ <unused>
             ("figure-far-from-ref", "«Далекий рисунок» на с. 3"),
             ("table-no-header", "без головки"),
             ("table-continuation", "«Велика таблиця»"),
-            ("caption-position", "під таблицею"),
+            ("caption-position", "під таблицями"),
         ],
     );
 }
@@ -306,6 +306,14 @@ fn probes_do_not_change_layout() {
     let Some(typst) = typst() else {
         return;
     };
+    // Позиції читає `typst eval` (є з typst 0.15)
+    let has_eval = Command::new(&typst)
+        .args(["eval", "--help"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !has_eval {
+        return;
+    }
     let dir = temp_dir("layout");
     std::fs::write(dir.join("main.typ"), LAYOUT_DOCUMENT).unwrap();
     let query = "query(selector(heading).or(figure).or(par).or(footnote).or(math.equation).or(list).or(table)).map(e => { let p = e.location().position(); (repr(e.func()), p.page, calc.round(p.x.pt(), digits: 3), calc.round(p.y.pt(), digits: 3)) })";
@@ -337,8 +345,6 @@ fn probes_do_not_change_layout() {
             text: true,
             par: true,
             table: true,
-            equation: true,
-            runs: true,
         },
     ));
     assert!(plain.len() > 100, "{plain}");
@@ -393,7 +399,7 @@ $ y = 3 $ <b>
         &found,
         &[
             ("formula-numbering", "крайньому правому"),
-            ("formula-numbering", "за порядком має бути «(А.1)»"),
+            ("formula-numbering", "з літерою додатка: «(А.1)»"),
         ],
     );
     assert!(!has(&found, "formula-numbering", "без круглих дужок"));
@@ -499,12 +505,58 @@ fn plain_typst_defaults() {
             ("caption-separator", "двокрапка «:»"),
             ("structure-name", "«Бібліографія»"),
             ("citation-order", "[2] надруковано раніше за [1]"),
-            (
-                "heading-style",
-                "заголовок додатка «Код програми» надруковано великими",
-            ),
+            ("heading-style", "заголовки додатків надруковано великими"),
         ],
     );
+}
+
+/// Номер рисунка, складений нумерацією з частин (`context`, розмітка,
+/// `strong`), друкується кількома прогонами й читається цілим, а окрема
+/// крапка після номера лишається роздільником.
+#[test]
+fn split_figure_numbers() {
+    if typst().is_none() {
+        return;
+    }
+    let dir = temp_dir("split-numbers");
+    let found = check(
+        &dir,
+        r#"#set text(lang: "uk")
+#set heading(numbering: "1.1")
+#set figure.caption(separator: [ -- ])
+= Розділ
+Текст розділу, досить довгий, щоб мати ключ прив'язки до коду документа.
+#[
+  #set figure.caption(separator: [. ])
+  #figure(rect(), caption: [Крапка])
+]
+
+#set heading(supplement: [Додаток], numbering: "А.1")
+#counter(heading).update(0)
+= Слайди
+#counter(figure.where(kind: image)).update(0)
+Текст додатка, досить довгий, щоб мати ключ прив'язки до коду документа.
+#let letter() = upper("абв".clusters().at(counter(heading).get().first() - 1))
+#let app-letter = context letter()
+#set figure(numbering: i => app-letter + "." + str(i))
+#figure(rect(), caption: [Перший])
+#set figure(numbering: i => [#context letter().#i])
+#figure(rect(), caption: [Другий])
+#set figure(numbering: i => context strong(letter()) + "." + str(i))
+#figure(rect(), caption: [Третій])
+#set figure(numbering: i => context [#letter().#i])
+#figure(rect(), caption: [Четвертий])
+#set figure(numbering: i => context [А.#i])
+#figure(rect(), caption: [П'ятий])
+"#,
+        &[],
+    );
+    expect(&found, &[("caption-separator", "крапка «.»")]);
+    let wrong: Vec<_> = found
+        .iter()
+        .filter(|(r, _)| r == "object-numbering")
+        .collect();
+    assert!(wrong.is_empty(), "{wrong:?}");
 }
 
 /// Документ з власним `foreground` (водяний знак) не вимикає перевірки
@@ -531,5 +583,91 @@ fn own_page_foreground() {
     assert!(
         !found.iter().any(|(r, _)| r == "abstract-counts"),
         "{found:?}"
+    );
+}
+
+/// Таблиця типових значень (`src/defaults.rs`) збігається з тим, що дає
+/// typst з PATH: інакше статичні правила оформлення помиляються мовчки.
+#[test]
+fn defaults_match_typst() {
+    use dsty::defaults as d;
+    let Some(typst) = typst() else {
+        return;
+    };
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let out = Command::new(&typst)
+        .args(["query", "defaults.typ", "<d>", "--field", "value"])
+        .current_dir(&fixtures)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
+    let num = |v: &str, unit: &str| v.strip_suffix(unit).and_then(|n| n.parse::<f64>().ok());
+    let near =
+        |v: &str, unit: &str, want: f64| num(v, unit).is_some_and(|n| (n - want).abs() < 0.01);
+    let quoted = |s: &str| format!("\"{s}\"");
+    let weight = |w: i64| match w {
+        400 => "\"regular\"",
+        700 => "\"bold\"",
+        _ => "?",
+    };
+    let mut wrong = Vec::new();
+    let mut seen = 0;
+    for e in &entries {
+        let (k, v) = (e["k"].as_str().unwrap(), e["v"].as_str().unwrap());
+        let parts: Vec<&str> = k.split('.').collect();
+        let ok = match k {
+            "text.size" => near(v, "pt", d::TEXT_SIZE),
+            "text.font" => v == quoted(&d::FONT.to_lowercase()),
+            "text.weight" => v == weight(d::WEIGHT),
+            "text.lang" => v == quoted(d::LANG),
+            "par.leading" => near(v, "em", d::LEADING_EM),
+            "page.width" => d::PAPER == "a4" && near(v, "pt", 595.28),
+            "page.height" => d::PAPER == "a4" && near(v, "pt", 841.89),
+            "page.number-align" => v.replace(' ', "") == d::PAGE_NUMBER_ALIGN,
+            "list.marker" => {
+                let [a, b, c] = d::LIST_MARKERS;
+                v == format!("([{a}], [{b}], [{c}])")
+            }
+            "enum.numbering" => v == quoted(d::ENUM_NUMBERING),
+            "footnote.numbering" => v == quoted(d::FOOTNOTE_NUMBERING),
+            "footnote.entry.separator" => {
+                v.starts_with(&format!("line(length: {}% + 0pt", d::FOOTNOTE_LINE * 100.0))
+            }
+            "figure.caption.position" => v == if d::CAPTION_TOP { "top" } else { "bottom" },
+            "math.equation.number-align" => v.replace(' ', "") == d::EQUATION_NUMBER_ALIGN,
+            "footnote.size" => near(v, "pt", d::TEXT_SIZE * d::FOOTNOTE_SIZE_EM),
+            "footnote.leading" => near(v, "em", d::FOOTNOTE_LEADING_EM),
+            _ if k.starts_with("heading") && k.ends_with(".size") => {
+                let level = k["heading".len()..k.len() - ".size".len()].parse().unwrap();
+                near(v, "pt", d::TEXT_SIZE * d::heading_em(level))
+            }
+            _ if k.starts_with("heading") && k.ends_with(".weight") => {
+                v == weight(d::HEADING_WEIGHT)
+            }
+            _ if parts[0] == "supplement" => {
+                d::supplement(parts[1], parts[2]).is_some_and(|s| v == format!("[{s}]"))
+            }
+            _ if parts[0] == "separator" => {
+                d::caption_separator(parts[1]).is_some_and(|s| v == format!("[{s}]"))
+            }
+            _ => panic!("невідоме значення {k}"),
+        };
+        seen += 1;
+        if !ok {
+            wrong.push(format!("{k}: typst {v}"));
+        }
+    }
+    let version = Command::new(&typst).arg("--version").output().unwrap();
+    assert!(seen >= 40, "лише {seen} значень");
+    assert!(
+        wrong.is_empty(),
+        "{} має інші типові значення, ніж src/defaults.rs:\n{}",
+        String::from_utf8_lossy(&version.stdout).trim(),
+        wrong.join("\n")
     );
 }

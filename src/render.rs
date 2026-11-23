@@ -428,7 +428,8 @@ pub fn explain(rule: &crate::rules::Rule, color: bool, width: Option<usize>) -> 
 /// ```text
 /// ПРАВИЛО          ВИД               ПУНКТ          ОПИС
 /// heading-single   static            7.4.6          Єдиний пункт розділу чи…
-/// new-page         full              4.2.1, 4.3.1,  Структурні елементи й
+/// font-size        static+full       7.1.5, 7.9.6   Основний текст і…
+/// new-page         static            4.2.1, 4.3.1,  Структурні елементи й
 ///                                    4.4.1, 4.5.2,  додатки починають з нової
 /// ```
 pub fn rules_table(rules: &[crate::rules::Rule], color: bool, width: Option<usize>) -> String {
@@ -440,10 +441,10 @@ pub fn rules_table(rules: &[crate::rules::Rule], color: bool, width: Option<usiz
     let kinds: Vec<Vec<(&str, &str)>> = rules
         .iter()
         .map(|r| {
-            let mut kind = vec![if r.full {
-                ("full", BLUE)
-            } else {
-                ("static", "2")
+            let mut kind = vec![match r.kind() {
+                "full" => ("full", BLUE),
+                "static+full" => ("static+full", BLUE),
+                _ => ("static", "2"),
             }];
             if r.optional {
                 kind.push(("enable", "33"));
@@ -597,7 +598,7 @@ mod tests {
             .position(|l| l.starts_with("new-page "))
             .unwrap();
         assert!(
-            lines[at].contains(" full ") && lines[at].contains("4.2.1, 4.3.1,"),
+            lines[at].contains(" static ") && lines[at].contains("4.2.1, 4.3.1,"),
             "{table}"
         );
         assert!(lines[at + 1].trim_start().starts_with("4.4.1,"), "{table}");

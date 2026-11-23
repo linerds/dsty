@@ -76,9 +76,17 @@ pub enum Value {
     Args(Rc<Args>),
     /// Тип (`type(x)`): його назва.
     Type(&'static str),
-    /// Значення вбудованого типу, якого не обчислюємо (`path(…)`, колір):
+    /// Значення вбудованого типу, якого не обчислюємо (`path(…)`):
     /// відомо лише, що воно є.
     Thing,
+    /// Вирівнювання: складники через `+` (`right+top`), як у коді.
+    Align(String),
+    /// Колір: чи він чорний.
+    Color(bool),
+    /// `counter(ціль)`: ціль (`heading`, `page`, `footnote`, `figure:image`, …).
+    Counter(String),
+    /// `елемент.where(…)`: елемент і умови.
+    Selector(Rc<(String, Vec<(String, Value)>)>),
 }
 
 /// Частина вмісту.
@@ -104,6 +112,26 @@ pub enum Item {
     Maybe(Rc<Vec<Item>>),
     /// Вміст, якого не обчислити.
     Unknown,
+    /// Розрив сторінки (`pagebreak`).
+    Pagebreak,
+    /// Горизонтальний проміжок (`h(…)`, лівий відступ `pad`).
+    H(Value),
+    /// Власний текст елемента в show-функції (`it.body`).
+    Hole,
+    /// Номер елемента, як його друкує лічильник (`counter(…).display(…)`).
+    Number,
+    /// `counter(ціль).update(значення)`; `Unknown` для `step` і функцій.
+    Count(String, Value),
+    /// `context …`: обчислюється там, де стоїть ([`Evaluator::resolve`]).
+    Ctx(Rc<Deferred>),
+}
+
+/// Відкладений вираз `context`: вузол і значення, які він захопив.
+#[derive(Debug)]
+pub struct Deferred {
+    file: usize,
+    node: SyntaxNode,
+    captured: Rc<Vec<(String, Value)>>,
 }
 
 /// Вбудований елемент і його аргументи.
@@ -146,7 +174,7 @@ impl Value {
                 for item in items.iter() {
                     match item {
                         Item::Text(t) => out.push_str(t),
-                        Item::Space => out.push(' '),
+                        Item::Space | Item::H(_) => out.push(' '),
                         Item::Styled(_, inner) | Item::Block(inner) => {
                             out.push_str(&Value::Content(inner.clone()).text()?)
                         }
@@ -192,10 +220,22 @@ fn styled(effects: Vec<Effect>, rest: Value) -> Value {
     content(vec![Item::Styled(Rc::new(effects), Rc::new(rest.items()))])
 }
 
+/// Чи є у вмісті `context`.
+fn needs_resolve(item: &Item) -> bool {
+    match item {
+        Item::Ctx(_) => true,
+        Item::Styled(_, inner) | Item::Block(inner) | Item::Maybe(inner) => {
+            inner.iter().any(needs_resolve)
+        }
+        _ => false,
+    }
+}
+
 /// Чи є у вмісті вміст документа.
 fn has_source(items: &[Item]) -> bool {
     items.iter().any(|item| match item {
         Item::Source(_) | Item::Body => true,
+        Item::Styled(e, _) if matches!(e.first(), Some(Effect::Written(_))) => true,
         Item::Block(inner) | Item::Styled(_, inner) | Item::Maybe(inner) => has_source(inner),
         Item::Elem(e) => e
             .args
@@ -246,6 +286,66 @@ pub enum Effect {
     Set(Rc<SetEffect>),
     /// Щось, чого не простежити (невідоме `show: …`): діяти могло що завгодно.
     Opaque,
+    /// `show селектор: …` для елемента.
+    Show(Rc<ShowEffect>),
+    /// `upper(…)` (`true`) чи `lower(…)`.
+    Case(bool),
+    /// Вміст набрано в коді проєкту ([`Written`]): обхід документа бере його
+    /// звідти, а не з обчисленого вмісту.
+    Written(Rc<Written>),
+}
+
+/// Блок вмісту з коду проєкту (`#let назва = […]` верхнього рівня): де він
+/// і вузол `[…]`. Документ, що його друкує, друкує цей код.
+#[derive(Debug)]
+pub struct Written {
+    pub path: PathBuf,
+    pub node: SyntaxNode,
+}
+
+/// `show елемент.where(…): перетворення`.
+#[derive(Debug)]
+pub struct ShowEffect {
+    /// `heading`, `figure`, `figure.caption`, `math.equation`, `footnote.entry`, …
+    pub elem: String,
+    /// Умови `.where(…)`.
+    pub filter: Vec<(String, Value)>,
+    pub transform: Transform,
+    /// Файл і вузол правила.
+    pub path: PathBuf,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub enum Transform {
+    /// `show …: set ціль(…)`: налаштування всередині елемента.
+    Set(Rc<SetEffect>),
+    /// `show …: it => …` чи інша функція.
+    Func(Value),
+    /// Перетворення, якого не обчислити.
+    Unknown,
+}
+
+impl ShowEffect {
+    /// Чи діє правило на елемент `elem` з полями `fields`; `None`, якщо
+    /// умови з коду не видно.
+    pub fn matches(&self, elem: &str, fields: &[(&str, Value)]) -> Option<bool> {
+        if self.elem != elem {
+            return Some(false);
+        }
+        let mut known = true;
+        for (k, want) in &self.filter {
+            match fields.iter().find(|(f, _)| f == k) {
+                Some((_, have)) => match same(have, want) {
+                    Some(true) => {}
+                    Some(false) => return Some(false),
+                    None => known = false,
+                },
+                None => known = false,
+            }
+        }
+        known.then_some(true)
+    }
 }
 
 /// `set ціль(…)`, застосоване до вмісту.
@@ -338,6 +438,20 @@ pub struct Evaluator<'a> {
     by_path: HashMap<PathBuf, usize>,
     fuel: usize,
     depth: usize,
+    /// Значення `return`, яке піднімається до виклику функції.
+    ret: Option<Value>,
+    /// Лічильник заголовків там, де зараз модель (`counter(heading).get()`).
+    heading: Option<Vec<i64>>,
+    /// Скільки посилань на кожну мітку (`query(ref.where(target: …))`);
+    /// `None`, поки документ не обійдено.
+    refs: Option<HashMap<String, usize>>,
+    /// Глибина обчислення `context`.
+    resolving: usize,
+    /// Змінні циклу, у якому зараз обхід документа: (файл, назва, значення).
+    doc_locals: Vec<(usize, String, Value)>,
+    /// Обчислюється значення верхнього рівня файлу проєкту: (файл, глибина
+    /// викликів). Блоки вмісту саме цього файлу й рівня позначаються [`Written`].
+    written: Option<(usize, usize)>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -349,7 +463,27 @@ impl<'a> Evaluator<'a> {
             by_path: HashMap::new(),
             fuel: FUEL,
             depth: 0,
+            ret: None,
+            heading: None,
+            refs: None,
+            resolving: 0,
+            doc_locals: Vec::new(),
+            written: None,
         }
+    }
+
+    /// Обхід документа заходить у тіло циклу у файлі `path`: змінна `name`
+    /// має значення `value` для всіх виразів цього файлу до [`Self::unbind_local`].
+    pub fn bind_local(&mut self, path: &Path, name: &str, value: Value) {
+        let root = self.root.clone();
+        if let Some(file) = self.file_id(path, &root) {
+            self.doc_locals.push((file, name.to_owned(), value));
+        }
+    }
+
+    /// Знімає останню змінну, задану [`Self::bind_local`].
+    pub fn unbind_local(&mut self) {
+        self.doc_locals.pop();
     }
 
     /// Файл, уже розібраний моделлю: щоб не розбирати вдруге.
@@ -399,10 +533,13 @@ impl<'a> Evaluator<'a> {
         let root = self.root.clone();
         let file = self.file_id(path, &root)?;
         self.ensure_module(file);
-        Some(Env {
-            file,
-            locals: Vec::new(),
-        })
+        let locals = self
+            .doc_locals
+            .iter()
+            .filter(|(f, _, _)| *f == file)
+            .map(|(_, n, v)| (n.clone(), v.clone()))
+            .collect();
+        Some(Env { file, locals })
     }
 
     // --- Відкриті методи для моделі ----------------------------------------------
@@ -452,13 +589,116 @@ impl<'a> Evaluator<'a> {
         self.show_with(&func, content(vec![Item::Body]), env.file)
     }
 
+    /// Лічильник заголовків там, де зараз обхід документа.
+    pub fn set_heading(&mut self, counter: Option<Vec<i64>>) {
+        self.heading = counter;
+    }
+
+    /// Посилання документа: скільки разів на кожну мітку.
+    pub fn set_refs(&mut self, refs: HashMap<String, usize>) {
+        self.refs = Some(refs);
+    }
+
+    /// Обчислює `context` у вмісті там, де він стоїть.
+    pub fn resolve(&mut self, items: &[Item]) -> Vec<Item> {
+        let mut out = Vec::new();
+        for item in items {
+            match item {
+                Item::Ctx(d) => {
+                    if self.resolving >= 8 || !self.tick() {
+                        out.push(Item::Unknown);
+                        continue;
+                    }
+                    self.ensure_module(d.file);
+                    let mut env = Env {
+                        file: d.file,
+                        locals: d.captured.to_vec(),
+                    };
+                    self.resolving += 1;
+                    let saved = self.ret.take();
+                    let v = match d.node.cast::<Expr>() {
+                        Some(e) => self.eval(e, &mut env),
+                        None => Value::Unknown,
+                    };
+                    let v = self.ret.take().unwrap_or(v);
+                    self.ret = saved;
+                    let items = self.resolve(&v.items());
+                    self.resolving -= 1;
+                    out.extend(items);
+                }
+                Item::Styled(e, inner) => {
+                    out.push(Item::Styled(e.clone(), Rc::new(self.resolve(inner))));
+                }
+                Item::Block(inner) => out.push(Item::Block(Rc::new(self.resolve(inner)))),
+                Item::Maybe(inner) => out.push(Item::Maybe(Rc::new(self.resolve(inner)))),
+                other => out.push(other.clone()),
+            }
+        }
+        out
+    }
+
+    /// Значення з обчисленим `context`.
+    pub fn resolved(&mut self, v: Value) -> Value {
+        match &v {
+            Value::Content(items) if items.iter().any(needs_resolve) => {
+                content(self.resolve(items))
+            }
+            _ => v,
+        }
+    }
+
+    /// `show селектор: …` у файлі `path` як налаштування елемента.
+    pub fn show_effect_in(&mut self, path: &Path, show: ast::ShowRule) -> Option<Effect> {
+        let mut env = self.env_of(path)?;
+        self.show_effect(show, &mut env)
+    }
+
+    /// Що друкує show-функція `func` для елемента `elem`.
+    pub fn render(&mut self, func: &Value, elem: Rc<Elem>) -> Value {
+        let it = content(vec![Item::Elem(elem)]);
+        let out = match func {
+            Value::Func(_) => {
+                let args = Args {
+                    pos: vec![it],
+                    ..Default::default()
+                };
+                self.call_value(func, args, 0, Span::detached())
+            }
+            v => v.clone(),
+        };
+        self.resolved(out)
+    }
+
+    /// Значення функції нумерації чи шаблону для номерів `nums`.
+    pub fn number(&mut self, numbering: &Value, nums: &[i64]) -> Value {
+        match numbering {
+            Value::Str(p) => apply_numbering(p, nums).map_or(Value::Unknown, Value::Str),
+            Value::Func(_) => {
+                let args = Args {
+                    pos: nums.iter().map(|&n| Value::Int(n)).collect(),
+                    ..Default::default()
+                };
+                let v = self.call_value(numbering, args, 0, Span::detached());
+                self.resolved(v)
+            }
+            Value::None => Value::None,
+            _ => Value::Unknown,
+        }
+    }
+
     /// `set`-правило у файлі `path` як налаштування.
     pub fn set_in(&mut self, path: &Path, set: ast::SetRule) -> Option<Rc<SetEffect>> {
         let mut env = self.env_of(path)?;
         match self.set_effect(set, &mut env)? {
             Effect::Set(s) => Some(s),
-            Effect::Opaque => None,
+            _ => None,
         }
+    }
+
+    /// Розібраний код файлу `path`, якщо його вже прочитано.
+    pub fn source_of(&self, path: &Path) -> Option<Source> {
+        let id = *self.by_path.get(&normalize(path))?;
+        Some(self.files[id].source.clone())
     }
 
     /// Вбудований `text(…)[…]` чи `par(…)[…]` у файлі `path` як налаштування
@@ -503,10 +743,21 @@ impl<'a> Evaluator<'a> {
             file,
             locals: Vec::new(),
         };
+        // Вміст, набраний у значеннях верхнього рівня файлу проєкту (`#let
+        // назва = […]`), пам'ятає свій код ([`Written`])
+        let project = self.files[file].root == self.root;
         if let Some(markup) = source.root().cast::<ast::Markup>() {
             for expr in markup.exprs() {
                 let bound = match expr {
-                    Expr::LetBinding(l) => self.let_binding(l, &mut env),
+                    Expr::LetBinding(l) => {
+                        let saved = self.written.take();
+                        if project {
+                            self.written = Some((file, self.depth));
+                        }
+                        let bound = self.let_binding(l, &mut env);
+                        self.written = saved;
+                        bound
+                    }
                     Expr::ModuleImport(i) => self.import(i, &env),
                     _ => continue,
                 };
@@ -538,18 +789,21 @@ impl<'a> Evaluator<'a> {
                 };
                 vec![(name.as_str().to_owned(), value)]
             }
-            kind => kind
-                .bindings()
-                .into_iter()
-                .map(|n| (n.as_str().to_owned(), Value::Unknown))
-                .collect(),
+            // `let (a, b) = …`, `let (x: a, ..rest) = …`
+            ast::LetBindingKind::Normal(pattern) => {
+                let value = match l.init() {
+                    Some(init) => self.eval(init, env),
+                    None => Value::None,
+                };
+                destructure(pattern, &value)
+            }
         };
         env.locals.extend(bound.iter().cloned());
         bound
     }
 
-    /// Імпорт: прив'язки, які він додає.
-    fn import(&mut self, imp: ast::ModuleImport, env: &Env) -> Vec<(String, Value)> {
+    /// Модуль, який імпортує `imp`.
+    fn import_module(&mut self, imp: ast::ModuleImport, env: &Env) -> Option<usize> {
         let module = match imp.source() {
             Expr::Str(s) => {
                 let spec = s.get();
@@ -573,6 +827,12 @@ impl<'a> Evaluator<'a> {
         if let Some(m) = module {
             self.ensure_module(m);
         }
+        module
+    }
+
+    /// Імпорт: прив'язки, які він додає.
+    fn import(&mut self, imp: ast::ModuleImport, env: &Env) -> Vec<(String, Value)> {
+        let module = self.import_module(imp, env);
         let get = |this: &Self, m: Option<usize>, name: &str| -> Value {
             m.and_then(|m| this.files[m].bindings.get(name).cloned())
                 .unwrap_or(Value::Unknown)
@@ -658,6 +918,15 @@ impl<'a> Evaluator<'a> {
         if is_builtin(name) {
             return Value::Func(Rc::new(Func::Builtin(name.to_owned())));
         }
+        if ALIGNMENTS.contains(&name) {
+            return Value::Align(name.to_owned());
+        }
+        if name == "black" {
+            return Value::Color(true);
+        }
+        if COLORS.contains(&name) {
+            return Value::Color(false);
+        }
         Value::Unknown
     }
 
@@ -687,7 +956,19 @@ impl<'a> Evaluator<'a> {
             Expr::Label(l) => Value::Label(l.get().to_owned()),
             Expr::ContentBlock(b) => {
                 let exprs: Vec<Expr> = b.body().exprs().collect();
-                self.seq(&exprs, &mut env.clone(), true)
+                let written = self.written.take();
+                let value = self.seq(&exprs, &mut env.clone(), true);
+                self.written = written;
+                match written {
+                    Some((file, depth)) if file == env.file && depth == self.depth => styled(
+                        vec![Effect::Written(Rc::new(Written {
+                            path: self.files[file].path.clone(),
+                            node: expr.to_untyped().clone(),
+                        }))],
+                        value,
+                    ),
+                    _ => value,
+                }
             }
             Expr::CodeBlock(b) => {
                 let exprs: Vec<Expr> = b.body().exprs().collect();
@@ -773,26 +1054,37 @@ impl<'a> Evaluator<'a> {
                 },
                 _ => {
                     let a = self.eval(c.if_body(), env);
+                    let ra = self.ret.take();
                     let b = match c.else_body() {
                         Some(e) => self.eval(e, env),
                         None => Value::None,
                     };
+                    let rb = self.ret.take();
+                    // `return` в гілці, якої не видно: результат функції невідомий
+                    if ra.is_some() || rb.is_some() {
+                        self.ret = Some(Value::Unknown);
+                        return Value::Never;
+                    }
                     uncertain(a, b)
                 }
             },
+            Expr::FuncReturn(r) => {
+                let v = match r.body() {
+                    Some(e) => self.eval(e, env),
+                    None => Value::None,
+                };
+                self.ret = Some(v);
+                Value::Never
+            }
             Expr::ForLoop(f) => {
                 let iterable = self.eval(f.iterable(), env);
-                let ident = match f.pattern() {
-                    ast::Pattern::Normal(Expr::Ident(id)) => Some(id.as_str().to_owned()),
-                    _ => None,
-                };
                 let names: Vec<String> = f
                     .pattern()
                     .bindings()
                     .iter()
                     .map(|n| n.as_str().to_owned())
                     .collect();
-                let Value::Array(values) = iterable else {
+                let Some(values) = iterate(&iterable) else {
                     // Скільки разів і з чим, не видно: вміст тіла лише можливий
                     let mut inner = env.clone();
                     for n in &names {
@@ -804,21 +1096,21 @@ impl<'a> Evaluator<'a> {
                 let mut acc = Value::None;
                 for v in values.iter().take(MAX_LOOP) {
                     let mut inner = env.clone();
-                    match &ident {
-                        Some(name) => inner.locals.push((name.clone(), v.clone())),
-                        None => {
-                            for n in &names {
-                                inner.locals.push((n.clone(), Value::Unknown));
-                            }
-                        }
-                    }
+                    inner.locals.extend(destructure(f.pattern(), v));
                     let body = self.eval(f.body(), &mut inner);
+                    if self.ret.is_some() {
+                        return Value::Never;
+                    }
                     acc = join(acc, body);
                 }
                 acc
             }
             Expr::WhileLoop(_) => Value::Unknown,
-            Expr::Contextual(_) => content(vec![Item::Unknown]),
+            Expr::Contextual(c) => content(vec![Item::Ctx(Rc::new(Deferred {
+                file: env.file,
+                node: c.body().to_untyped().clone(),
+                captured: Rc::new(env.locals.clone()),
+            }))]),
             Expr::SetRule(_) | Expr::ShowRule(_) | Expr::LetBinding(_) | Expr::ModuleImport(_) => {
                 let exprs = [expr];
                 self.seq(&exprs, env, false)
@@ -956,9 +1248,14 @@ impl<'a> Evaluator<'a> {
                         }
                     }
                     Some(_) => {
-                        if let Some(effect) = self.heading_show(show, env) {
+                        let effects: Vec<Effect> = self
+                            .heading_show(show, env)
+                            .into_iter()
+                            .chain(self.show_effect(show, env))
+                            .collect();
+                        if !effects.is_empty() {
                             let rest = self.seq(&exprs[i..], env, markup);
-                            return join(acc, styled(vec![effect], rest));
+                            return join(acc, styled(effects, rest));
                         }
                     }
                 },
@@ -971,8 +1268,14 @@ impl<'a> Evaluator<'a> {
                 }
                 e => {
                     let v = self.eval(e, env);
+                    if self.ret.is_some() {
+                        return Value::Never;
+                    }
                     acc = join(acc, v);
                 }
+            }
+            if self.ret.is_some() {
+                return Value::Never;
             }
         }
         acc
@@ -1059,6 +1362,11 @@ impl<'a> Evaluator<'a> {
                 _ => Value::Unknown,
             },
             Value::Dict(_) => target.get(name).cloned().unwrap_or(Value::Unknown),
+            // Поле елемента в show-функції (`it.body`, `it.level`)
+            Value::Content(items) => match items.as_slice() {
+                [Item::Elem(e)] => e.named(name).cloned().unwrap_or(Value::Unknown),
+                _ => Value::Unknown,
+            },
             _ => Value::Unknown,
         }
     }
@@ -1107,11 +1415,55 @@ impl<'a> Evaluator<'a> {
         let target = self.eval(f.target(), env);
         let name = f.field().as_str();
         match (&target, name) {
+            (Value::Counter(c), "display") if c != "state" => Err(content(vec![Item::Number])),
+            // Зміна лічильника нічого не друкує, але номери далі інші
+            (Value::Counter(c), "update" | "step") if c != "state" => {
+                let a = self.args(args, env, false);
+                let value = match name {
+                    "update" => a.pos.first().cloned().unwrap_or(Value::Unknown),
+                    _ => Value::Unknown,
+                };
+                Err(content(vec![Item::Count(c.clone(), value)]))
+            }
+            (Value::Counter(_), "update") => Err(content(Vec::new())),
             (Value::Func(func), "with") => {
                 let bound = self.args(args, env, doc);
                 Err(Value::Func(Rc::new(Func::With(func.clone(), bound))))
             }
-            (Value::Func(_), "where" | "before" | "after" | "or" | "and") => Err(Value::Unknown),
+            (Value::Func(func), "where") => {
+                let Func::Builtin(name) = &**func else {
+                    return Err(Value::Unknown);
+                };
+                let a = self.args(args, env, false);
+                Err(Value::Selector(Rc::new((
+                    name.trim_start_matches("std.").to_owned(),
+                    a.named,
+                ))))
+            }
+            (Value::Func(_), "before" | "after" | "or" | "and") => Err(Value::Unknown),
+            // Лічильник заголовків там, де стоїть `context`
+            (Value::Counter(c), "get" | "at") if c == "heading" => Err(match &self.heading {
+                Some(h) => Value::Array(Rc::new(h.iter().map(|&n| Value::Int(n)).collect())),
+                None => Value::Unknown,
+            }),
+            // Поля й методи елемента в show-функції
+            (Value::Content(items), "has" | "func")
+                if matches!(items.as_slice(), [Item::Elem(_)]) =>
+            {
+                let [Item::Elem(e)] = items.as_slice() else {
+                    unreachable!()
+                };
+                if name == "func" {
+                    return Err(Value::Func(Rc::new(Func::Builtin(e.func.clone()))));
+                }
+                let a = self.args(args, env, false);
+                Err(match a.pos.first() {
+                    Some(Value::Str(k)) => {
+                        Value::Bool(e.named(k).is_some_and(|v| !matches!(v, Value::None)))
+                    }
+                    _ => Value::Unknown,
+                })
+            }
             (Value::Module(_), _) | (Value::Func(_), _) => Ok(self.field(target, name)),
             (Value::Array(items), "map") => {
                 let a = self.args(args, env, false);
@@ -1188,7 +1540,10 @@ impl<'a> Evaluator<'a> {
                 };
                 let mut env = self.bind(*file, closure, captured, args);
                 self.depth += 1;
+                let saved = self.ret.take();
                 let v = self.eval(closure.body(), &mut env);
+                let v = self.ret.take().unwrap_or(v);
+                self.ret = saved;
                 self.depth -= 1;
                 v
             }
@@ -1269,12 +1624,51 @@ impl<'a> Evaluator<'a> {
             "table.hline" | "table.vline" | "grid.hline" | "grid.vline" | "metadata" => {
                 content(Vec::new())
             }
-            "align" | "block" | "pad" | "place" | "stack" | "columns" | "rect" | "square"
-            | "circle" | "ellipse" | "scale" | "move" | "rotate" | "quote" => {
+            "align" => {
+                let block = content(vec![Item::Block(Rc::new(body(&args)))]);
+                match args.pos.iter().find(|v| matches!(v, Value::Align(_))) {
+                    Some(a) => {
+                        let set = self.builtin_set("align", "alignment", a.clone(), file, span);
+                        styled(vec![set], block)
+                    }
+                    None => block,
+                }
+            }
+            // Лівий відступ `pad` стоїть на початку блоку
+            "pad" => {
+                let named = |k: &str| args.named.iter().rev().find(|(n, _)| n == k);
+                let left = named("left")
+                    .or_else(|| named("x"))
+                    .or_else(|| named("rest"))
+                    .map(|(_, v)| v.clone())
+                    .or_else(|| {
+                        args.pos
+                            .iter()
+                            .find(|v| matches!(v, Value::Length(_)))
+                            .cloned()
+                    });
+                let mut items = Vec::new();
+                if let Some(left) = left {
+                    items.push(Item::H(left));
+                }
+                items.extend(body(&args));
+                content(vec![Item::Block(Rc::new(items))])
+            }
+            "block" | "place" | "stack" | "columns" | "rect" | "square" | "circle" | "ellipse"
+            | "scale" | "move" | "rotate" | "quote" => {
                 content(vec![Item::Block(Rc::new(body(&args)))])
             }
-            "box" | "strong" | "emph" | "underline" | "overline" | "strike" | "highlight"
-            | "smallcaps" | "sub" | "super" | "hide" | "link" | "repeat" => content(body(&args)),
+            "strong" => {
+                let set = self.builtin_set("text", "weight", Value::Str("bold".into()), file, span);
+                styled(vec![set], content(body(&args)))
+            }
+            "emph" => {
+                let set =
+                    self.builtin_set("text", "style", Value::Str("italic".into()), file, span);
+                styled(vec![set], content(body(&args)))
+            }
+            "box" | "underline" | "overline" | "strike" | "highlight" | "smallcaps" | "sub"
+            | "super" | "hide" | "link" | "repeat" => content(body(&args)),
             "upper" | "lower" => {
                 let up = name == "upper";
                 let case = |s: &str| {
@@ -1286,15 +1680,19 @@ impl<'a> Evaluator<'a> {
                 };
                 match first {
                     Some(Value::Str(s)) => Value::Str(case(s)),
-                    Some(Value::Content(items)) => content(
-                        items
+                    Some(Value::Content(items)) => {
+                        let mapped = items
                             .iter()
                             .map(|i| match i {
                                 Item::Text(t) => Item::Text(case(t)),
                                 other => other.clone(),
                             })
-                            .collect(),
-                    ),
+                            .collect();
+                        content(vec![Item::Styled(
+                            Rc::new(vec![Effect::Case(up)]),
+                            Rc::new(mapped),
+                        )])
+                    }
                     _ => Value::Unknown,
                 }
             }
@@ -1316,8 +1714,74 @@ impl<'a> Evaluator<'a> {
                 };
                 styled(vec![Effect::Set(Rc::new(set))], content(body(&args)))
             }
-            "pagebreak" | "colbreak" | "v" | "parbreak" => content(vec![Item::Parbreak]),
-            "h" | "linebreak" => content(vec![Item::Space]),
+            "pagebreak" => content(vec![Item::Pagebreak]),
+            "colbreak" | "v" | "parbreak" => content(vec![Item::Parbreak]),
+            "h" => content(vec![Item::H(first.cloned().unwrap_or(Value::Unknown))]),
+            "linebreak" => content(vec![Item::Space]),
+            "line" => elem(name, args),
+            "state" => Value::Counter("state".into()),
+            "counter" => match first {
+                Some(Value::Func(f)) => match &**f {
+                    Func::Builtin(b) => Value::Counter(b.trim_start_matches("std.").to_owned()),
+                    _ => Value::Unknown,
+                },
+                Some(Value::Str(s)) => Value::Counter(s.clone()),
+                // `counter(figure.where(kind: image))`
+                Some(Value::Selector(sel)) => {
+                    let kind = sel.1.iter().find(|(k, _)| k == "kind").map(|(_, v)| v);
+                    match kind {
+                        Some(Value::Func(f)) => match &**f {
+                            Func::Builtin(k) => Value::Counter(format!("{}:{k}", sel.0)),
+                            _ => Value::Unknown,
+                        },
+                        None => Value::Counter(sel.0.clone()),
+                        _ => Value::Unknown,
+                    }
+                }
+                _ => Value::Unknown,
+            },
+            // Посилання на мітку: скільки їх у документі
+            "query" => match (first, &self.refs) {
+                (Some(Value::Selector(sel)), Some(refs)) if sel.0 == "ref" => {
+                    match sel.1.iter().find(|(k, _)| k == "target").map(|(_, v)| v) {
+                        Some(Value::Label(l)) => {
+                            Value::Array(Rc::new(vec![
+                                Value::Thing;
+                                refs.get(l).copied().unwrap_or(0)
+                            ]))
+                        }
+                        _ => Value::Unknown,
+                    }
+                }
+                _ => Value::Unknown,
+            },
+            "here" | "locate" => Value::Thing,
+            "numbering" => {
+                let nums: Option<Vec<i64>> = args
+                    .pos
+                    .iter()
+                    .skip(1)
+                    .map(|v| match v {
+                        Value::Int(i) => Some(*i),
+                        _ => None,
+                    })
+                    .collect();
+                match (first, nums) {
+                    (_, None) => Value::Unknown,
+                    (Some(Value::Str(p)), Some(nums)) => {
+                        apply_numbering(p, &nums).map_or(Value::Unknown, Value::Str)
+                    }
+                    (Some(f @ Value::Func(_)), Some(nums)) => {
+                        let f = f.clone();
+                        let call = Args {
+                            pos: nums.into_iter().map(Value::Int).collect(),
+                            ..Default::default()
+                        };
+                        self.call_value(&f, call, file, span)
+                    }
+                    _ => Value::Unknown,
+                }
+            }
             // Мітка з виразу, якого не обчислити: є, але яка, не видно
             "label" => match first {
                 Some(Value::Str(s)) => Value::Label(s.clone()),
@@ -1329,8 +1793,11 @@ impl<'a> Evaluator<'a> {
                 Some(t) => Value::Type(t),
                 None => Value::Unknown,
             },
-            "path" | "read" | "bytes" | "datetime" | "regex" | "rgb" | "luma" | "cmyk"
-            | "color" => Value::Thing,
+            "rgb" | "luma" => match black(name, &args) {
+                Some(b) => Value::Color(b),
+                None => Value::Thing,
+            },
+            "path" | "read" | "bytes" | "datetime" | "regex" | "cmyk" | "color" => Value::Thing,
             "toml" => match first {
                 Some(Value::Str(path)) => {
                     let base = &self.files[file];
@@ -1358,6 +1825,8 @@ impl<'a> Evaluator<'a> {
                 None => Value::Unknown,
             },
             "lorem" => content(vec![Item::Unknown]),
+            "range" => range(&args),
+            _ if name.starts_with("calc.") => calc(&name[5..], &args),
             _ => Value::Unknown,
         }
     }
@@ -1384,6 +1853,19 @@ impl<'a> Evaluator<'a> {
                         name: n.name().as_str().to_owned(),
                         value,
                         span: n.expr().span(),
+                    });
+                }
+                // `set align(center)`: вирівнювання — позиційний аргумент
+                ast::Arg::Pos(e) if path_of(set.target()).as_deref() == Some("align") => {
+                    let value = if uncertain {
+                        Value::Unknown
+                    } else {
+                        self.eval(e, env)
+                    };
+                    args.push(SetArg {
+                        name: "alignment".into(),
+                        value,
+                        span: e.span(),
                     });
                 }
                 ast::Arg::Pos(_) | ast::Arg::Spread(_) => open = true,
@@ -1419,6 +1901,79 @@ impl<'a> Evaluator<'a> {
             path: self.files[env.file].path.clone(),
             span: set.span(),
         })))
+    }
+
+    /// `show елемент.where(…): …` як налаштування елемента; `None` для
+    /// селекторів не з елементів (рядок, мітка, `selector(…)`).
+    fn show_effect(&mut self, show: ast::ShowRule, env: &mut Env) -> Option<Effect> {
+        let (elem, filter) = match show.selector()? {
+            Expr::FuncCall(call) => {
+                let Expr::FieldAccess(f) = call.callee() else {
+                    return None;
+                };
+                if f.field().as_str() != "where" {
+                    return None;
+                }
+                let elem = path_of(f.target())?;
+                let mut filter = Vec::new();
+                for arg in call.args().items() {
+                    match arg {
+                        ast::Arg::Named(n) => {
+                            let v = self.eval(n.expr(), env);
+                            filter.push((n.name().as_str().to_owned(), v));
+                        }
+                        _ => filter.push((String::new(), Value::Unknown)),
+                    }
+                }
+                (elem, filter)
+            }
+            e => (path_of(e)?, Vec::new()),
+        };
+        let elem = elem.trim_start_matches("std.").to_owned();
+        if !is_builtin(elem.split('.').next().unwrap_or("")) {
+            return None;
+        }
+        let transform = match show.transform() {
+            Expr::SetRule(set) => match self.set_effect(set, env)? {
+                Effect::Set(s) => Transform::Set(s),
+                _ => Transform::Unknown,
+            },
+            t => match self.eval(t, env) {
+                v @ (Value::Func(_) | Value::Content(_) | Value::Str(_) | Value::None) => {
+                    Transform::Func(v)
+                }
+                _ => Transform::Unknown,
+            },
+        };
+        Some(Effect::Show(Rc::new(ShowEffect {
+            elem,
+            filter,
+            transform,
+            path: self.files[env.file].path.clone(),
+            span: show.span(),
+        })))
+    }
+
+    /// Налаштування, яке дає вбудована функція (`strong` -> `text(weight: "bold")`).
+    fn builtin_set(
+        &self,
+        target: &str,
+        arg: &str,
+        value: Value,
+        file: usize,
+        span: Span,
+    ) -> Effect {
+        Effect::Set(Rc::new(SetEffect {
+            target: target.into(),
+            args: vec![SetArg {
+                name: arg.into(),
+                value,
+                span: Span::detached(),
+            }],
+            open: false,
+            path: self.files[file].path.clone(),
+            span,
+        }))
     }
 
     /// `show heading: it => …`, що друкує «Додаток» перед заголовком: такі
@@ -1575,6 +2130,10 @@ fn type_of(v: &Value) -> Option<&'static str> {
         Value::Module(_) => "module",
         Value::Args(_) => "arguments",
         Value::Type(_) => "type",
+        Value::Align(_) => "alignment",
+        Value::Color(_) => "color",
+        Value::Counter(_) => "counter",
+        Value::Selector(_) => "selector",
         Value::Unknown | Value::Never | Value::Thing => return None,
     })
 }
@@ -1630,6 +2189,7 @@ fn binary(op: ast::BinOp, lhs: Value, rhs: Value) -> Value {
             }
         }
         (Add, V::Str(a), V::Str(b)) => V::Str(format!("{a}{b}")),
+        (Add, V::Align(a), V::Align(b)) => V::Align(format!("{a}+{b}")),
         (Add, V::Array(a), V::Array(b)) => {
             V::Array(Rc::new(a.iter().chain(b.iter()).cloned().collect()))
         }
@@ -1693,6 +2253,21 @@ fn same(a: &Value, b: &Value) -> Option<bool> {
         (V::Type(t), V::Func(f)) | (V::Func(f), V::Type(t)) => {
             matches!(&**f, Func::Builtin(b) if b == t)
         }
+        (V::Func(a), V::Func(b)) => match (&**a, &**b) {
+            (Func::Builtin(a), Func::Builtin(b)) => {
+                a.trim_start_matches("std.") == b.trim_start_matches("std.")
+            }
+            _ => return None,
+        },
+        (V::Align(a), V::Align(b)) => {
+            let parts = |s: &str| {
+                let mut p: Vec<String> = s.split('+').map(str::to_owned).collect();
+                p.sort_unstable();
+                p
+            };
+            parts(a) == parts(b)
+        }
+        (V::Color(a), V::Color(b)) if *a && *b => true,
         (a, b) if number(a).is_some() && number(b).is_some() => number(a) == number(b),
         (V::Array(a), V::Array(b)) => {
             if a.len() != b.len() {
@@ -1735,6 +2310,41 @@ fn method(target: &Value, name: &str, args: &Args) -> Value {
                 .and_then(|i| a.get(i).cloned())
                 .or_else(default)
                 .unwrap_or(Value::Unknown)
+        }
+        (Value::Array(a), "enumerate", None) => {
+            let start = match args.named.iter().find(|(k, _)| k == "start") {
+                None => 0,
+                Some((_, Value::Int(s))) => *s,
+                Some(_) => return Value::Unknown,
+            };
+            Value::Array(Rc::new(
+                a.iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        Value::Array(Rc::new(vec![Value::Int(start + i as i64), v.clone()]))
+                    })
+                    .collect(),
+            ))
+        }
+        (Value::Array(a), "rev", None) => Value::Array(Rc::new(a.iter().rev().cloned().collect())),
+        (Value::Dict(_), "pairs", None) => {
+            iterate(target).map_or(Value::Unknown, |p| Value::Array(Rc::new(p)))
+        }
+        (Value::Str(s), "slice", Some(Value::Int(from))) => {
+            let chars: Vec<char> = s.chars().collect();
+            let at = |i: i64| -> Option<usize> {
+                let i = if i < 0 { chars.len() as i64 + i } else { i };
+                usize::try_from(i).ok().filter(|&i| i <= chars.len())
+            };
+            let end = match args.pos.get(1) {
+                None => Some(chars.len()),
+                Some(Value::Int(e)) => at(*e),
+                Some(_) => None,
+            };
+            match (at(*from), end) {
+                (Some(a), Some(b)) if a <= b => Value::Str(chars[a..b].iter().collect()),
+                _ => Value::Unknown,
+            }
         }
         (Value::Array(a), "first", None) => a.first().cloned().unwrap_or(Value::Unknown),
         (Value::Array(a), "last", None) => a.last().cloned().unwrap_or(Value::Unknown),
@@ -1888,6 +2498,132 @@ fn package_dirs(namespace: &str) -> Vec<PathBuf> {
     out
 }
 
+/// Номер за шаблоном нумерації typst (`"1.1"`, `"а)"` не шаблон, `"A.1"`):
+/// як `numbering(шаблон, ..nums)`. `None`: символ лічби, якого не
+/// обчислюємо, чи шаблон без жодного.
+pub fn apply_numbering(pattern: &str, nums: &[i64]) -> Option<String> {
+    // (префікс, символ лічби) і суфікс, як у typst
+    let mut pieces: Vec<(String, char)> = Vec::new();
+    let mut prefix = String::new();
+    for c in pattern.chars() {
+        match c {
+            '1' | 'a' | 'A' | 'i' | 'I' | '*' => pieces.push((std::mem::take(&mut prefix), c)),
+            'α' | 'Α' | '一' | '壹' | 'あ' | 'い' | 'ア' | 'イ' | 'א' | '가' | 'ㄱ' | '①' | '⓵' =>
+            {
+                return None;
+            }
+            c => prefix.push(c),
+        }
+    }
+    if pieces.is_empty() {
+        return None;
+    }
+    let suffix = prefix;
+    let mut out = String::new();
+    let mut nums = nums.iter();
+    for ((prefix, kind), &n) in pieces.iter().zip(&mut nums) {
+        out.push_str(prefix);
+        out.push_str(&count(*kind, n)?);
+    }
+    let (prefix, kind) = pieces.last()?;
+    for &n in nums {
+        out.push_str(if prefix.is_empty() { &suffix } else { prefix });
+        out.push_str(&count(*kind, n)?);
+    }
+    out.push_str(&suffix);
+    Some(out)
+}
+
+/// Число `n` символом лічби `kind`.
+fn count(kind: char, n: i64) -> Option<String> {
+    let letters = |base: u8| {
+        let mut n = n;
+        let mut out = Vec::new();
+        while n > 0 {
+            n -= 1;
+            out.push((base + (n % 26) as u8) as char);
+            n /= 26;
+        }
+        out.iter().rev().collect::<String>()
+    };
+    Some(match kind {
+        '1' => n.to_string(),
+        _ if n <= 0 => return None,
+        'a' => letters(b'a'),
+        'A' => letters(b'A'),
+        'i' | 'I' => {
+            let mut n = n;
+            let mut out = String::new();
+            for (v, s) in [
+                (1000, "M"),
+                (900, "CM"),
+                (500, "D"),
+                (400, "CD"),
+                (100, "C"),
+                (90, "XC"),
+                (50, "L"),
+                (40, "XL"),
+                (10, "X"),
+                (9, "IX"),
+                (5, "V"),
+                (4, "IV"),
+                (1, "I"),
+            ] {
+                while n >= v {
+                    out.push_str(s);
+                    n -= v;
+                }
+            }
+            if kind == 'i' { out.to_lowercase() } else { out }
+        }
+        _ => {
+            let symbols = ['*', '†', '‡', '§', '¶', '‖'];
+            let k = ((n - 1) / 6 + 1) as usize;
+            symbols[((n - 1) % 6) as usize].to_string().repeat(k)
+        }
+    })
+}
+
+/// Чи чорний колір `rgb(…)` чи `luma(…)`; `None`, якщо з аргументів не видно.
+fn black(name: &str, args: &Args) -> Option<bool> {
+    let ints: Option<Vec<f64>> = args
+        .pos
+        .iter()
+        .map(|v| match v {
+            Value::Ratio(r) => Some(*r),
+            v => number(v),
+        })
+        .collect();
+    match (name, args.pos.first()) {
+        ("rgb", Some(Value::Str(hex))) => {
+            let hex = hex.trim_start_matches('#');
+            let digits = if hex.len() == 4 || hex.len() == 8 {
+                &hex[..hex.len() * 3 / 4]
+            } else {
+                hex
+            };
+            if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            Some(digits.chars().all(|c| c == '0'))
+        }
+        ("rgb", _) => {
+            let v = ints?;
+            (v.len() >= 3).then(|| v[..3].iter().all(|&c| c == 0.0))
+        }
+        _ => Some(ints?.first()? == &0.0),
+    }
+}
+
+const ALIGNMENTS: &[&str] = &[
+    "left", "right", "center", "top", "bottom", "horizon", "start", "end",
+];
+
+const COLORS: &[&str] = &[
+    "gray", "silver", "white", "navy", "blue", "aqua", "teal", "eastern", "purple", "fuchsia",
+    "maroon", "red", "orange", "yellow", "olive", "green", "lime",
+];
+
 /// Імена вбудованих функцій і типів: невідомий ідентифікатор інакше дає
 /// [`Value::Unknown`].
 fn is_builtin(name: &str) -> bool {
@@ -1906,8 +2642,189 @@ const BUILTINS: &[&str] = &[
     "bool", "array", "dictionary", "content", "function", "length", "arguments", "module",
     "type", "toml", "json", "yaml", "csv", "read", "path", "bytes", "datetime", "regex",
     "rgb", "luma", "cmyk", "color", "repr", "query", "here", "locate", "measure", "layout",
-    "calc", "label", "selector", "document", "smartquote", "panic", "assert",
+    "calc", "label", "selector", "document", "smartquote", "panic", "assert", "range",
 ];
+
+/// Найбільше значень у `range(…)`: довший масив з коду не стежимо.
+const MAX_RANGE: i64 = 10_000;
+
+/// `range(кінець)`, `range(початок, кінець, step: крок)`.
+fn range(args: &Args) -> Value {
+    let int = |v: &Value| match v {
+        Value::Int(i) => Some(*i),
+        _ => None,
+    };
+    let step = match args.named.iter().find(|(k, _)| k == "step") {
+        None => 1,
+        Some((_, Value::Int(s))) if *s != 0 => *s,
+        Some(_) => return Value::Unknown,
+    };
+    let bounds: Option<Vec<i64>> = args.pos.iter().map(int).collect();
+    let (start, end) = match bounds.as_deref() {
+        Some([end]) => (0, *end),
+        Some([start, end]) => (*start, *end),
+        _ => return Value::Unknown,
+    };
+    if (end - start) / step > MAX_RANGE {
+        return Value::Unknown;
+    }
+    let mut out = Vec::new();
+    let mut i = start;
+    while (step > 0 && i < end) || (step < 0 && i > end) {
+        out.push(Value::Int(i));
+        i += step;
+    }
+    Value::Array(Rc::new(out))
+}
+
+/// Функції `calc`, які трапляються в нумерації й підписах.
+fn calc(name: &str, args: &Args) -> Value {
+    let pos = &args.pos;
+    let ints: Option<Vec<i64>> = pos
+        .iter()
+        .map(|v| match v {
+            Value::Int(i) => Some(*i),
+            _ => None,
+        })
+        .collect();
+    let floats: Option<Vec<f64>> = pos.iter().map(number).collect();
+    match (name, ints.as_deref(), floats.as_deref()) {
+        ("min", Some(i), _) if !i.is_empty() => Value::Int(*i.iter().min().unwrap()),
+        ("max", Some(i), _) if !i.is_empty() => Value::Int(*i.iter().max().unwrap()),
+        ("min", _, Some(f)) if !f.is_empty() => {
+            Value::Float(f.iter().copied().fold(f64::INFINITY, f64::min))
+        }
+        ("max", _, Some(f)) if !f.is_empty() => {
+            Value::Float(f.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+        }
+        ("abs", Some([i]), _) => Value::Int(i.abs()),
+        ("abs", _, Some([f])) => Value::Float(f.abs()),
+        ("floor", _, Some([f])) => Value::Int(f.floor() as i64),
+        ("ceil", _, Some([f])) => Value::Int(f.ceil() as i64),
+        ("round", _, Some([f])) if args.named.is_empty() => Value::Int(f.round() as i64),
+        ("rem", Some([a, b]), _) if *b != 0 => Value::Int(a % b),
+        ("quo", Some([a, b]), _) if *b != 0 => Value::Int(a.div_euclid(*b)),
+        ("pow", Some([a, b]), _) if (0..=62).contains(b) => {
+            a.checked_pow(*b as u32).map_or(Value::Unknown, Value::Int)
+        }
+        ("even", Some([i]), _) => Value::Bool(i % 2 == 0),
+        ("odd", Some([i]), _) => Value::Bool(i % 2 != 0),
+        _ => Value::Unknown,
+    }
+}
+
+/// Значення, за якими йде `for`: елементи масиву, пари `(ключ, значення)`
+/// словника, символи рядка.
+pub fn iterate(value: &Value) -> Option<Vec<Value>> {
+    match value {
+        Value::Array(a) => Some(a.to_vec()),
+        Value::Dict(d) => Some(
+            d.iter()
+                .map(|(k, v)| Value::Array(Rc::new(vec![Value::Str(k.clone()), v.clone()])))
+                .collect(),
+        ),
+        Value::Str(s) => Some(s.chars().map(|c| Value::Str(c.to_string())).collect()),
+        _ => None,
+    }
+}
+
+/// Прив'язки зразка `pattern` до `value` (`let (a, ..b) = …`, `for (k, v) in …`).
+/// Чого не зіставити, те невідоме.
+pub fn destructure(pattern: ast::Pattern, value: &Value) -> Vec<(String, Value)> {
+    let unknown = |p: ast::Pattern| -> Vec<(String, Value)> {
+        p.bindings()
+            .into_iter()
+            .map(|n| (n.as_str().to_owned(), Value::Unknown))
+            .collect()
+    };
+    match pattern {
+        ast::Pattern::Normal(Expr::Ident(id)) => vec![(id.as_str().to_owned(), value.clone())],
+        ast::Pattern::Normal(_) | ast::Pattern::Placeholder(_) => Vec::new(),
+        ast::Pattern::Parenthesized(p) => destructure(p.pattern(), value),
+        ast::Pattern::Destructuring(d) => {
+            let items: Vec<ast::DestructuringItem> = d.items().collect();
+            match value {
+                Value::Array(a) => {
+                    let spread = items
+                        .iter()
+                        .position(|i| matches!(i, ast::DestructuringItem::Spread(_)));
+                    let fixed = items.len() - usize::from(spread.is_some());
+                    let fits = match spread {
+                        Some(_) => a.len() >= fixed,
+                        None => a.len() == fixed,
+                    };
+                    if !fits
+                        || items
+                            .iter()
+                            .any(|i| matches!(i, ast::DestructuringItem::Named(_)))
+                    {
+                        return unknown(pattern);
+                    }
+                    let mut out = Vec::new();
+                    let after = spread.map_or(0, |s| items.len() - s - 1);
+                    for (k, item) in items.iter().enumerate() {
+                        match item {
+                            ast::DestructuringItem::Pattern(p) => {
+                                let at = match spread {
+                                    Some(s) if k > s => a.len() - (items.len() - k),
+                                    _ => k,
+                                };
+                                out.extend(destructure(*p, &a[at]));
+                            }
+                            ast::DestructuringItem::Spread(sp) => {
+                                if let Some(id) = sp.sink_ident() {
+                                    let rest = a[k..a.len() - after].to_vec();
+                                    out.push((id.as_str().to_owned(), Value::Array(Rc::new(rest))));
+                                }
+                            }
+                            ast::DestructuringItem::Named(_) => {}
+                        }
+                    }
+                    out
+                }
+                Value::Dict(d) => {
+                    let mut out = Vec::new();
+                    let mut used = Vec::new();
+                    for item in &items {
+                        match item {
+                            ast::DestructuringItem::Pattern(ast::Pattern::Normal(Expr::Ident(
+                                id,
+                            ))) => {
+                                let key = id.as_str();
+                                used.push(key.to_owned());
+                                out.push((
+                                    key.to_owned(),
+                                    value.get(key).cloned().unwrap_or(Value::Unknown),
+                                ));
+                            }
+                            ast::DestructuringItem::Named(n) => {
+                                let key = n.name().as_str();
+                                used.push(key.to_owned());
+                                match value.get(key) {
+                                    Some(v) => out.extend(destructure(n.pattern(), v)),
+                                    None => out.extend(unknown(n.pattern())),
+                                }
+                            }
+                            ast::DestructuringItem::Spread(sp) => {
+                                if let Some(id) = sp.sink_ident() {
+                                    let rest: Vec<_> = d
+                                        .iter()
+                                        .filter(|(k, _)| !used.contains(k))
+                                        .cloned()
+                                        .collect();
+                                    out.push((id.as_str().to_owned(), Value::Dict(Rc::new(rest))));
+                                }
+                            }
+                            ast::DestructuringItem::Pattern(p) => out.extend(unknown(*p)),
+                        }
+                    }
+                    out
+                }
+                _ => unknown(pattern),
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1964,12 +2881,22 @@ mod tests {
                                 format!("{}({})", s.target, args.join(","))
                             }
                             Effect::Opaque => "?".into(),
+                            Effect::Show(s) => format!("show {}", s.elem),
+                            Effect::Case(true) => "upper".into(),
+                            Effect::Case(false) => "lower".into(),
+                            Effect::Written(_) => "written".into(),
                         })
                         .collect();
                     format!("{}[{}]", sets.join("+"), shape(inner))
                 }
                 Item::Maybe(inner) => format!("maybe[{}]", shape(inner)),
                 Item::Unknown => "…".into(),
+                Item::Pagebreak => "⤓".into(),
+                Item::H(_) => "h".into(),
+                Item::Hole => "HOLE".into(),
+                Item::Number => "N".into(),
+                Item::Count(c, _) => format!("count({c})"),
+                Item::Ctx(_) => "ctx".into(),
             });
         }
         out.join(" ")
@@ -2031,7 +2958,7 @@ mod tests {
         ];
         assert_eq!(
             show(&list, "tpl.with(size: 12pt)"),
-            "page(paper)[text(size)[block[\"ЗВІТ\"] BODY text(size)[\"Кінець\"]]]"
+            "page(paper)[text(size)[show heading[align(alignment)[block[\"ЗВІТ\"]] BODY text(size)[\"Кінець\"]]]]"
         );
     }
 

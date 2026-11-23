@@ -6,7 +6,7 @@
 
 use std::ops::Range;
 
-/// Місце у вихідному коді: номер файлу в [`crate::model::Doc::files`] і байти.
+/// Місце у вихідному коді: номер файлу в [`crate::model::Code::files`] і байти.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Loc {
     pub file: usize,
@@ -57,6 +57,16 @@ impl Text {
             src,
             exact,
         });
+    }
+
+    /// Дописує інший текст з його місцями в коді.
+    pub fn append(&mut self, other: Text) {
+        let shift = self.s.len();
+        self.s.push_str(&other.s);
+        self.segs.extend(other.segs.into_iter().map(|mut seg| {
+            seg.at = seg.at.start + shift..seg.at.end + shift;
+            seg
+        }));
     }
 
     /// Байти тексту без пробілів на початку й у кінці.

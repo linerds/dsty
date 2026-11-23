@@ -44,19 +44,15 @@ pub struct Sections {
     pub text: bool,
     pub par: bool,
     pub table: bool,
-    pub equation: bool,
-    pub runs: bool,
 }
 
 /// Обгортка з потрібними секціями проб.
 pub fn wrapper(main_rel: &str, sections: Sections) -> String {
     let keep = |name: &str| match name {
-        "marks" => sections.text || sections.par || sections.runs,
+        "marks" => sections.text || sections.par,
         "text" => sections.text,
         "par" => sections.par,
         "table" => sections.table,
-        "equation" => sections.equation,
-        "runs" => sections.runs,
         _ => true,
     };
     let mut out = String::with_capacity(PROBE.len());
@@ -305,8 +301,6 @@ mod tests {
                 text: true,
                 par: true,
                 table: true,
-                equation: true,
-                runs: true,
             },
         );
         assert!(all.contains("#show text.where(fill: rgb(\"#010001\"))"));
@@ -317,8 +311,6 @@ mod tests {
                 text: false,
                 par: false,
                 table: false,
-                equation: false,
-                runs: false,
             },
         );
         assert!(!lean.contains("#show text.where"));

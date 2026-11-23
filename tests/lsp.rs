@@ -219,8 +219,8 @@ fn full_check_on_open() {
     std::fs::create_dir_all(&dir).unwrap();
     let dir: PathBuf = dir.canonicalize().unwrap();
     let main = dir.join("main.typ");
-    // Номер на титульному аркуші: його бачить лише повна перевірка
-    let text = "#set page(numbering: \"1\")\nТекст документа.\n";
+    // П'ять виносок на сторінці: їх бачить лише повна перевірка
+    let text = "Текст#footnote[а]#footnote[б]#footnote[в]#footnote[г]#footnote[ґ].\n";
     std::fs::write(&main, text).unwrap();
     let uri = format!("file://{}", main.display());
 
@@ -242,12 +242,15 @@ fn full_check_on_open() {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let diags = client.wait_diagnostics(&uri);
-        if let Some(d) = diags.iter().find(|d| d["code"] == "page-number") {
-            // Зауваження стоїть на `set page`, а не на 1:1
-            assert_eq!(d["range"]["start"], json!({ "line": 0, "character": 1 }));
+        if let Some(d) = diags.iter().find(|d| d["code"] == "footnote-count") {
+            // Зауваження стоїть на першій виносці, а не на 1:1
+            assert_eq!(d["range"]["start"], json!({ "line": 0, "character": 6 }));
             break;
         }
-        assert!(Instant::now() < deadline, "немає page-number: {diags:#?}");
+        assert!(
+            Instant::now() < deadline,
+            "немає footnote-count: {diags:#?}"
+        );
     }
 
     client.request("shutdown", json!(null));
@@ -545,8 +548,8 @@ fn full_check_command_with_progress() {
     std::fs::create_dir_all(&dir).unwrap();
     let dir: PathBuf = dir.canonicalize().unwrap();
     let main = dir.join("main.typ");
-    // Номер на титульному аркуші: його бачить лише повна перевірка
-    let text = "#set page(numbering: \"1\")\nТекст документа.\n";
+    // П'ять виносок на сторінці: їх бачить лише повна перевірка
+    let text = "Текст#footnote[а]#footnote[б]#footnote[в]#footnote[г]#footnote[ґ].\n";
     std::fs::write(&main, text).unwrap();
     let uri = format!("file://{}", main.display());
 
@@ -581,10 +584,13 @@ fn full_check_command_with_progress() {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let diags = client.wait_diagnostics(&uri);
-        if diags.iter().any(|d| d["code"] == "page-number") {
+        if diags.iter().any(|d| d["code"] == "footnote-count") {
             break;
         }
-        assert!(Instant::now() < deadline, "немає page-number: {diags:#?}");
+        assert!(
+            Instant::now() < deadline,
+            "немає footnote-count: {diags:#?}"
+        );
     }
 
     client.request("shutdown", json!(null));

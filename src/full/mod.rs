@@ -16,8 +16,9 @@ pub use facts::Facts;
 pub use run::{Sections, Settings, cancel_all, wrapper};
 
 use crate::lint::{self, Options};
-use crate::model::Doc;
-use crate::rules::{Found, RULES, probe};
+use crate::model::Code;
+use crate::rules::{RULES, probe};
+use crate::work::Work;
 
 /// Які проби потрібні правилам, що ввімкнені.
 pub fn sections(options: &Options) -> Sections {
@@ -29,8 +30,6 @@ pub fn sections(options: &Options) -> Sections {
         text: probes & probe::TEXT != 0,
         par: probes & probe::PAR != 0,
         table: probes & probe::TABLE != 0,
-        equation: probes & probe::EQUATION != 0,
-        runs: probes & probe::RUNS != 0,
     }
 }
 
@@ -46,6 +45,8 @@ pub fn collect(main: &Path, settings: &Settings, options: &Options) -> anyhow::R
     run::collect(main, settings, sections(options))
 }
 
-pub(crate) fn check(doc: &Doc, facts: &Facts, active: &dyn Fn(&str) -> bool) -> Vec<Found> {
-    check::run(doc, facts, active)
+/// Кладе в модель факти розкладки з компіляції: для правил над ними
+/// ([`crate::rules::run_layout`]).
+pub fn lay_out(work: &mut Work, code: &Code, facts: &Facts) {
+    check::lay_out(work, code, facts)
 }

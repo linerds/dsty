@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use typst_syntax::{Source, SyntaxKind, SyntaxNode};
 
 use crate::full::Facts;
-use crate::model::{self, Doc};
+use crate::model::{self, Code};
 pub use crate::rules::Severity;
 use crate::rules::{self, FixDraft, Found, RULES, Rule};
 use crate::text::Loc;
@@ -149,30 +149,19 @@ pub fn check_full(
     facts: Option<&Facts>,
 ) -> anyhow::Result<Report> {
     validate(options)?;
-    let Some(doc) = model::build(root, main, load) else {
+    // Документ, що компілюється сам, — ціла робота, а не фрагмент: типові
+    // значення typst до нього стосуються
+    let Some((mut work, code)) = model::build(root, main, load, facts.is_some()) else {
         anyhow::bail!("не вдалося прочитати {}", main.display());
     };
-    let active = |code: &str| is_active(options, code);
-    let mut found = rules::run(&doc, &active);
+    let active = |rule: &str| is_active(options, rule);
+    let mut found = rules::run(&work, &code, &active);
     if let Some(facts) = facts {
-        // Повна перевірка не повторює статичне зауваження того самого правила в тому самому рядку
-        let line = |f: &Found| {
-            let source = &doc.files[f.loc.file].source;
-            (
-                f.loc.file,
-                position(source, f.loc.range.start).line,
-                f.rule.code,
-            )
-        };
-        let static_lines: std::collections::HashSet<_> = found.iter().map(line).collect();
-        found.extend(
-            crate::full::check(&doc, facts, &active)
-                .into_iter()
-                .filter(|f| f.rule.split || !static_lines.contains(&line(f))),
-        );
+        crate::full::lay_out(&mut work, &code, facts);
+        found.extend(rules::run_layout(&work, &code, &active));
     }
 
-    let mut suppressions: Vec<Suppressions> = doc
+    let mut suppressions: Vec<Suppressions> = code
         .files
         .iter()
         .map(|f| Suppressions::scan(&f.source))
@@ -180,18 +169,18 @@ pub fn check_full(
     let mut found: Vec<Found> = found
         .into_iter()
         .filter(|f| {
-            let source = &doc.files[f.loc.file].source;
+            let source = &code.files[f.loc.file].source;
             let line = position(source, f.loc.range.start).line;
             !suppressions[f.loc.file].covers(f.rule.code, line)
         })
         .collect();
     // Самі коментарі: невідомі правила й коментарі, що нічого не вимикають
     for (file, s) in suppressions.iter().enumerate() {
-        found.extend(s.report(file, &doc.files[file].source, facts.is_some(), &active));
+        found.extend(s.report(file, &code.files[file].source, facts.is_some(), &active));
     }
     let mut diagnostics: Vec<Diagnostic> = merge_groups(found)
         .into_iter()
-        .map(|f| diagnostic(&doc, options, f))
+        .map(|f| diagnostic(&code, options, f))
         .collect();
     diagnostics.sort_by(|a, b| {
         (&a.path, a.start.line, a.start.column).cmp(&(&b.path, b.start.line, b.start.column))
@@ -200,11 +189,11 @@ pub fn check_full(
         a.path == b.path && a.range == b.range && a.rule == b.rule && a.msg == b.msg
     });
 
-    let missing = doc
+    let missing = code
         .missing
         .iter()
         .map(|(loc, path)| {
-            let file = &doc.files[loc.file];
+            let file = &code.files[loc.file];
             (
                 file.path.clone(),
                 position(&file.source, loc.range.start),
@@ -214,7 +203,7 @@ pub fn check_full(
         .collect();
     Ok(Report {
         diagnostics,
-        files: doc.files.iter().map(|f| f.path.clone()).collect(),
+        files: code.files.iter().map(|f| f.path.clone()).collect(),
         missing,
     })
 }
@@ -286,15 +275,15 @@ fn positions(n: usize) -> &'static str {
     }
 }
 
-fn diagnostic(doc: &Doc, options: &Options, found: Found) -> Diagnostic {
-    let file = &doc.files[found.loc.file];
+fn diagnostic(code: &Code, options: &Options, found: Found) -> Diagnostic {
+    let file = &code.files[found.loc.file];
     let source = &file.source;
     let range = first_line(source, found.loc.range.clone());
     let related = found
         .related
         .iter()
         .map(|(loc, note)| {
-            let f = &doc.files[loc.file];
+            let f = &code.files[loc.file];
             let r = first_line(&f.source, loc.range.clone());
             (
                 f.path.clone(),

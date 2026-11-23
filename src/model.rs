@@ -1,4 +1,5 @@
-//! Модель документа з вихідного коду, без компіляції.
+//! Обхід вихідного коду, без компіляції: з нього — нейтральна модель роботи
+//! ([`crate::work::Work`]) і сам код ([`Code`]).
 //!
 //! Від main-файлу обходимо синтаксичне дерево (`typst-syntax`), заходимо в
 //! `#include` локальних файлів і збираємо в порядку документа те, що перевіряє
@@ -20,12 +21,20 @@ use typst_syntax::{FileId, LinkedNode, RootedPath, Source, SyntaxNode, VirtualPa
 use std::rc::Rc;
 
 use crate::eval::{self, Callee, Effect, Elem, Evaluator, Item as Part, SetArg, SetEffect, Value};
+use crate::look;
 use crate::style::{Origin, Style};
 use crate::text::{Loc, Text};
+use crate::work::{self, At, Element, Fact, Work};
+
+pub use crate::work::{Bib, FigureKind, Header, Item, Label, RefUse, Section};
 
 /// Спільний id для всіх файлів: span шукаємо лише в його власному дереві,
 /// тож різні id не потрібні, а інтернер `typst-syntax` не росте з кожною
 /// перевіркою.
+/// Цикл за відомим масивом обходиться для кожного значення лише до такої
+/// довжини: далі тіло обходиться раз зі змінною, якої не видно.
+const MAX_UNROLL: usize = 64;
+
 static FILE_ID: LazyLock<FileId> = LazyLock::new(|| {
     RootedPath::new(VirtualRoot::Project, VirtualPath::new("/dsty.typ").unwrap()).intern()
 });
@@ -39,58 +48,6 @@ pub struct SourceFile {
     pub path: PathBuf,
     pub source: Source,
 }
-
-#[derive(Default)]
-pub struct Doc {
-    pub files: Vec<SourceFile>,
-    pub blocks: Vec<Block>,
-    /// Посилання за міткою: порядкові номери в документі, за зростанням.
-    pub refs: HashMap<String, Vec<usize>>,
-    /// Є `bibliography`/`bib` (чи `bib-path` рецепта).
-    pub has_bibliography: bool,
-    /// `#include` файлів, яких не вдалося прочитати.
-    pub missing: Vec<(Loc, PathBuf)>,
-    /// Виноски в порядку документа (крім посилань на наявну виноску).
-    pub footnotes: Vec<Loc>,
-    /// Перше застосування шаблону (`#show: шаблон.with(…)`): сюди повна
-    /// перевірка ставить зауваження до налаштувань, яких у коді не видно.
-    pub template: Option<Loc>,
-    /// `set`-правила (і show-set) у порядку документа.
-    pub sets: Vec<SetRule>,
-    /// Виклики й `set`-правила `bibliography`.
-    pub bibs: Vec<Bib>,
-    /// Кожне посилання на мітку (`@мітка`, `ref(<мітка>)`) з текстом перед ним.
-    pub ref_uses: Vec<RefUse>,
-    /// Власне show-правило `ref` у коді документа: як друкуються посилання,
-    /// з коду не видно.
-    pub custom_ref: bool,
-    /// Налаштування тексту й сторінки ([`Par::style`]); перше — типові typst.
-    pub styles: Vec<Style>,
-}
-
-/// Посилання на мітку в тексті.
-#[derive(Debug)]
-pub struct RefUse {
-    pub target: String,
-    pub loc: Loc,
-    /// Підпис задано (`@x[рис.]`, `@x[]`, `ref(<x>, supplement: …)`).
-    pub supplement: bool,
-    /// Текст того самого абзацу перед посиланням (до 60 байтів).
-    pub before: String,
-}
-
-/// `bibliography(…)` чи `set bibliography(…)`: аргументи, які перевіряє стандарт.
-#[derive(Debug)]
-pub struct Bib {
-    /// Місце значення `full: true`.
-    pub full: Option<Loc>,
-    /// Назва й місце рядка в `style: "назва"`.
-    pub style: Option<(String, Loc)>,
-}
-
-/// Канонічна назва структурного елемента, у якому стоїть блок
-/// ([`crate::rules::BIBLIOGRAPHY`], [`crate::rules::ABBREVIATIONS`], …).
-pub type Section = Option<&'static str>;
 
 /// `set ціль(аргументи)`: де задано налаштування документа.
 #[derive(Debug)]
@@ -120,7 +77,31 @@ impl SetRule {
     }
 }
 
-impl Doc {
+/// Вихідний код роботи: файли, `set`-правила, рядок шаблону. Правила
+/// беруть з нього текст для виправлень і місце, де варто задати типове
+/// значення typst; самі факти — з [`crate::work::Work`].
+#[derive(Default)]
+pub struct Code {
+    pub files: Vec<SourceFile>,
+    /// `set`-правила документа за порядком.
+    pub sets: Vec<SetRule>,
+    /// Рядок, що застосовує шаблон.
+    pub template: Option<Loc>,
+    /// Імпорти й включення, файлів яких немає: (місце, шлях).
+    pub missing: Vec<(Loc, PathBuf)>,
+}
+
+impl Code {
+    /// Документ має власні налаштування тексту чи сторінки або шаблон.
+    /// Без них це найімовірніше фрагмент (розділ, відкритий окремо), і
+    /// типові значення typst до нього не стосуються.
+    pub fn configured(&self) -> bool {
+        self.template.is_some()
+            || self.sets.iter().any(|s| {
+                s.selector.is_none() && matches!(s.target.as_str(), "page" | "text" | "par")
+            })
+    }
+
     /// Місце налаштування `target` з аргументом `arg` (останнє в документі),
     /// інакше будь-якого `set target(…)`, інакше рядок шаблону, інакше перший
     /// непорожній рядок main-файлу. Show-set-правила (`show heading: set
@@ -158,170 +139,168 @@ impl Doc {
 
     /// Рядок шаблону або перший непорожній рядок main-файлу.
     pub fn anchor(&self) -> Loc {
-        if let Some(loc) = &self.template {
-            return loc.clone();
-        }
-        let text = self.files.first().map_or("", |f| f.source.text());
-        let mut start = 0;
-        for line in text.split_inclusive('\n') {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() && !trimmed.starts_with("//") {
-                let lead = line.len() - line.trim_start().len();
-                return Loc {
-                    file: 0,
-                    range: start + lead..start + lead + trimmed.len(),
-                };
-            }
-            start += line.len();
-        }
-        Loc {
-            file: 0,
-            range: 0..0,
-        }
+        anchor(&self.files, self.template.as_ref())
+    }
+
+    /// Код у місці `loc`.
+    pub fn text(&self, loc: &Loc) -> &str {
+        &self.files[loc.file].source.text()[loc.range.clone()]
+    }
+
+    /// Увесь файл, у якому `loc`.
+    pub fn file_text(&self, loc: &Loc) -> &str {
+        self.files[loc.file].source.text()
     }
 }
 
-#[derive(Debug)]
-pub enum Block {
-    Heading(Heading),
-    Figure(Figure),
-    List(List),
-    Par(Par),
+/// Як друкуються посилання; `custom`: власне show-правило `ref` у документі.
+fn ref_style(code: &Code, custom: bool) -> work::RefStyle {
+    // Підпис, заданий документом (`set figure(supplement: [рис.])`), може
+    // бути з малої літери
+    let lowercase = |target: &str| {
+        code.set_rule(target, "supplement")
+            .and_then(|s| s.value("supplement"))
+            .is_some_and(|v| {
+                let v = v.trim_start_matches(['[', '"', '(']);
+                v == "none" || v.starts_with(char::is_lowercase)
+            })
+    };
+    work::RefStyle {
+        custom: custom || code.set_rule("ref", "supplement").is_some(),
+        lower_figure: lowercase("figure"),
+        lower_equation: lowercase("math.equation"),
+        lower_heading: lowercase("heading"),
+    }
+}
+
+/// Рядок шаблону або перший непорожній рядок main-файлу.
+fn anchor(files: &[SourceFile], template: Option<&Loc>) -> Loc {
+    if let Some(loc) = template {
+        return loc.clone();
+    }
+    let text = files.first().map_or("", |f| f.source.text());
+    let mut start = 0;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with("//") {
+            let lead = line.len() - line.trim_start().len();
+            return Loc {
+                file: 0,
+                range: start + lead..start + lead + trimmed.len(),
+            };
+        }
+        start += line.len();
+    }
+    Loc {
+        file: 0,
+        range: 0..0,
+    }
+}
+
+/// Що обхід знає про елемент [`Work::elements`] з тим самим індексом і що
+/// знадобиться після обходу: номери, оформлення формул, номери сторінок.
+enum Pending {
+    None,
+    /// Налаштування там, де стоїть заголовок, і лічильники, які його
+    /// show-правило змінює.
+    Heading(usize, Vec<(String, Value)>),
+    /// Нумерація фігури й лічильник заголовків на ній.
+    Figure(Fact<Value>, Option<Vec<i64>>),
     Equation {
-        loc: Loc,
-        label: Option<Label>,
-        /// Формула йде одразу за іншою: між ними немає ні тексту, ні іншого
-        /// блока (коду, таблиці, переліку), лише проміжки й невидимий код.
-        follows: bool,
+        style: usize,
+        counter: Option<Vec<i64>>,
+        /// Нумерація, задана в самому виклику `math.equation(numbering: …)`.
+        explicit: Option<(Value, Loc)>,
     },
-    /// Ключові слова з аргументу шаблону (`abstract(keywords: …)`); шаблон
-    /// сам сортує їх за абеткою.
-    Keywords {
-        count: usize,
-        loc: Loc,
-    },
-    /// Ліва колонка переліку скорочень (7.14): терміни `/ ЕОМ: …` чи перша
-    /// колонка таблиці.
-    Terms(Vec<Text>),
+    /// `counter(ціль).update(значення)`.
+    Counter(String, Value),
 }
 
-/// Мітка елемента: `<назва>`, `label: <назва>`, `#label("назва")`; мітку з
-/// виразу (`#label(str(...))` у циклі) з коду не дізнатися.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Label {
-    Name(String),
-    Dynamic,
+/// Що стоїть на початку абзацу перед текстом.
+#[derive(Debug, Clone)]
+enum Start {
+    /// Розрив рядка `\`.
+    Break,
+    /// Проміжок `#h(…)` (його довжина, якщо її видно).
+    H(Option<crate::eval::Length>),
 }
 
-#[derive(Debug)]
-pub struct Heading {
-    pub level: usize,
-    pub title: Text,
-    pub numbered: bool,
-    /// Заголовок у додатках (`appendices`, `supplement: [Додаток]`).
-    pub appendix: bool,
-    pub label: Option<Label>,
-    pub loc: Loc,
-    /// Заголовок, який друкує шаблон (`abstract` -> «Реферат», `bib` -> «Перелік
-    /// джерел посилання»): у коді його тексту немає, тож без виправлень.
-    pub generated: bool,
-    /// Заголовок розмітки (`= Назва`): місце вузла й код назви без мітки
-    /// для виправлення на `#heading(…)[…]`.
-    pub markup: Option<(Loc, String)>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FigureKind {
-    Image,
-    Table,
-}
-
-#[derive(Debug)]
-pub struct Figure {
-    /// Місце в документі на одній шкалі з посиланнями ([`Doc::refs`]): чи
-    /// стоїть рисунок раніше за перше посилання на нього.
-    pub tick: usize,
-    pub kind: FigureKind,
-    pub caption: Option<Text>,
-    pub label: Option<Label>,
-    /// Головка таблиці (`table.header` / `header:` у `tab`).
-    pub header: Option<Header>,
-    /// Плаваюча фігура (`placement`): її місце в документі з коду не видно.
-    pub floating: bool,
-    pub loc: Loc,
-}
-
-#[derive(Debug)]
-pub struct Header {
-    pub cells: Vec<Text>,
-    /// Головка в один рядок: клітинок не більше, ніж колонок.
-    pub single_row: bool,
-}
-
-impl Header {
-    /// Кількість колонок `columns`, якщо її видно з коду.
-    fn new(cells: Vec<Text>, columns: Option<usize>) -> Self {
-        Header {
-            single_row: columns.is_some_and(|c| cells.len() <= c),
-            cells,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct List {
-    pub items: Vec<Item>,
-    /// Абзац (індекс у `Doc::blocks`), що стоїть безпосередньо перед переліком.
-    pub prev_par: Option<usize>,
-    /// Вкладений перелік (позиція іншого переліку).
-    pub nested: bool,
-    pub section: Section,
-}
-
-#[derive(Debug)]
-pub struct Item {
-    pub text: Text,
-    pub loc: Loc,
-    /// За текстом позиції йде вкладений перелік.
-    pub has_nested: bool,
-}
-
-#[derive(Debug)]
-pub struct Par {
-    pub text: Text,
-    /// Абзац іде одразу після виокремленої формули.
-    pub after_equation: bool,
-    pub section: Section,
-    /// Налаштування, що діють на абзац: індекс у [`Doc::styles`].
-    pub style: usize,
-}
-
-/// Будує модель документа. `load` читає файл (відкритий буфер чи диск).
-pub fn build(root: &Path, main: &Path, load: &dyn Fn(&Path) -> Option<String>) -> Option<Doc> {
+/// Будує модель роботи й вихідний код. `load` читає файл (відкритий буфер
+/// чи диск); `whole`: документ компілюється сам як ціла робота (повна
+/// перевірка), тож типові значення typst до нього стосуються.
+pub fn build(
+    root: &Path,
+    main: &Path,
+    load: &dyn Fn(&Path) -> Option<String>,
+    whole: bool,
+) -> Option<(Work, Code)> {
     let text = load(main)?;
     let mut walker = Walker {
         root: root.to_path_buf(),
         load,
         ev: Evaluator::new(root, load),
         para_style: 0,
-        doc: Doc {
-            styles: vec![Style::default()],
-            ..Doc::default()
-        },
+        code: Code::default(),
+        work: Work::default(),
+        styles: vec![Style::default()],
+        pending: Vec::new(),
+        custom_ref: false,
+        outline_style: None,
         tick: 0,
         including: vec![main.to_path_buf()],
+        placing: Vec::new(),
+        in_args: false,
         para: Text::default(),
         last: Last::None,
         section: None,
         template_text: String::new(),
         walked: 0,
+        page_fresh: Some(true),
+        counters: Some(Vec::new()),
+        footnote_style: None,
+        para_lead: None,
+        para_inline: None,
+        style_now: 0,
+        title_style: None,
+        seen_heading: false,
     };
     let file = walker.add_file(main.to_path_buf(), text);
     let cx = walker.cx(file);
     let mut scope = Scope::default();
     walker.markup(&cx, cx.root().cast().unwrap(), &mut scope);
     walker.flush();
-    Some(walker.doc)
+    if let Some(i) = walker.footnote_style {
+        let origins = walker.origins(&walker.code.anchor());
+        let style = walker.styles[i].clone();
+        walker.work.footnotes.look = Some(look::footnote(
+            &mut walker.ev,
+            &style,
+            &|s, a| origins.of_arg(s, a),
+            &|s, a| origins.of(s, a),
+        ));
+    }
+    walker.page_look();
+    walker.numbers();
+    let Walker {
+        mut work,
+        code,
+        styles,
+        custom_ref,
+        outline_style,
+        ..
+    } = walker;
+    work.scope = if whole || code.configured() {
+        work::Scope::Whole
+    } else {
+        work::Scope::Fragment
+    };
+    work.looks = styles.iter().map(Style::look).collect();
+    // Зауваження про текст змісту стоїть на `set text(hyphenate: …)`
+    work.contents = outline_style
+        .flatten()
+        .map(|s| s.text_look(&|_| At::default("text", &["hyphenate"])));
+    work.ref_style = ref_style(&code, custom_ref);
+    Some((work, code))
 }
 
 /// Корінь проєкту для шляхів `/…` (як `typst --root`): тека main-файлу, а
@@ -381,7 +360,7 @@ struct Scope {
     /// Заголовки нумеруються: `set heading(numbering: …)` чи застосований шаблон.
     numbered: bool,
     appendix: bool,
-    /// Налаштування тексту й сторінки: індекс у [`Doc::styles`].
+    /// Налаштування тексту й сторінки: індекс у `Walker::styles`.
     style: usize,
 }
 
@@ -424,9 +403,23 @@ struct Walker<'a> {
     ev: Evaluator<'a>,
     /// Налаштування на початку абзацу, що набирається.
     para_style: usize,
-    doc: Doc,
+    code: Code,
+    work: Work,
+    /// Налаштування тексту й сторінки в точках документа; перше — типові
+    /// typst. Індекси збігаються з [`Work::looks`].
+    styles: Vec<Style>,
+    /// Те, що знадобиться після обходу, для кожного елемента.
+    pending: Vec<Pending>,
+    /// Власне show-правило `ref` у коді документа.
+    custom_ref: bool,
+    /// Налаштування тексту в пунктах змісту (`outline`); `Some(None)`: не видно.
+    outline_style: Option<Option<Style>>,
     tick: usize,
     including: Vec<PathBuf>,
+    /// Обхід тексту зараз в аргументах виклику, якого не обчислити.
+    in_args: bool,
+    /// Вміст з `#let`, що зараз обходиться (файл і вузол).
+    placing: Vec<(PathBuf, typst_syntax::Span)>,
     /// Абзац, що набирається.
     para: Text,
     last: Last,
@@ -437,20 +430,37 @@ struct Walker<'a> {
     template_text: String,
     /// Скільки разів обійдено вміст документа з аргументів обгорток.
     walked: usize,
+    /// На поточній сторінці ще нічого не надруковано; `None`, якщо не видно.
+    page_fresh: Option<bool>,
+    /// Лічильник заголовків; `None`, якщо його з коду не видно.
+    counters: Option<Vec<i64>>,
+    /// Налаштування там, де перша виноска.
+    footnote_style: Option<usize>,
+    /// Абзац, що набирається, почався з розриву рядка чи проміжку.
+    para_lead: Option<Start>,
+    /// Абзац, що набирається, почався з `#text(…)[…]`.
+    para_inline: Option<usize>,
+    /// Налаштування там, де зараз обхід (для заголовків, які друкує шаблон).
+    style_now: usize,
+    /// Налаштування там, де до першого заголовка щось надруковано (титульний
+    /// аркуш: абзаци документа чи текст шаблону).
+    title_style: Option<usize>,
+    /// Уже був заголовок.
+    seen_heading: bool,
 }
 
 impl Walker<'_> {
     fn add_file(&mut self, path: PathBuf, text: String) -> usize {
         let source = parse(text);
         self.ev.adopt(&path, source.clone());
-        self.doc.files.push(SourceFile { path, source });
-        self.doc.files.len() - 1
+        self.code.files.push(SourceFile { path, source });
+        self.code.files.len() - 1
     }
 
     fn cx(&self, file: usize) -> Cx {
         Cx {
             file,
-            source: self.doc.files[file].source.clone(),
+            source: self.code.files[file].source.clone(),
         }
     }
 
@@ -459,29 +469,55 @@ impl Walker<'_> {
         self.tick
     }
 
-    fn emit(&mut self, block: Block) {
-        self.last = match &block {
-            Block::Par(_) => Last::Par(self.doc.blocks.len()),
-            Block::Equation { .. } => Last::Equation,
-            Block::Keywords { .. } => self.last,
+    fn emit(&mut self, element: Element, pending: Pending) {
+        if !matches!(element, Element::Keywords { .. }) {
+            self.page_fresh = Some(false);
+        }
+        match &element {
+            Element::Heading(_) => self.seen_heading = true,
+            Element::Par(p) if !self.seen_heading => {
+                self.title_style.get_or_insert(p.look);
+            }
+            _ => {}
+        }
+        self.last = match &element {
+            Element::Par(_) => Last::Par(self.work.elements.len()),
+            Element::Equation { .. } => Last::Equation,
+            Element::Keywords { .. } => self.last,
             _ => Last::Other,
         };
-        self.doc.blocks.push(block);
+        self.work.elements.push(element);
+        self.pending.push(pending);
     }
 
     /// Завершує абзац, що набирається.
     fn flush(&mut self) {
         let text = std::mem::take(&mut self.para);
         if text.trimmed().is_empty() {
+            self.para_lead = None;
+            self.para_inline = None;
             return;
         }
         let after_equation = self.last == Last::Equation;
-        self.emit(Block::Par(Par {
-            text,
-            after_equation,
-            section: self.section(),
-            style: self.para_style,
-        }));
+        let size = self.styles[self.para_style].size_pt();
+        let lead = self.para_lead.take().map(|l| match l {
+            Start::Break => work::Lead::Break,
+            Start::H(h) => {
+                work::Lead::Space(h.map(|h| crate::style::pt(&h, size).unwrap_or(f64::NAN)))
+            }
+        });
+        let first_look = self.para_inline.take();
+        self.emit(
+            Element::Par(work::Par {
+                text,
+                after_equation,
+                section: self.section(),
+                look: self.para_style,
+                lead,
+                first_look,
+            }),
+            Pending::None,
+        );
     }
 
     fn section(&self) -> Section {
@@ -490,7 +526,7 @@ impl Walker<'_> {
 
     fn add_ref(&mut self, target: &str) {
         let tick = self.next_tick();
-        self.doc
+        self.work
             .refs
             .entry(target.to_owned())
             .or_default()
@@ -504,7 +540,7 @@ impl Walker<'_> {
         while !text.is_char_boundary(from) {
             from += 1;
         }
-        self.doc.ref_uses.push(RefUse {
+        self.work.ref_uses.push(RefUse {
             target: target.to_owned(),
             loc: cx.loc(node),
             supplement,
@@ -541,6 +577,7 @@ impl Walker<'_> {
         let mut i = 0;
         while i < exprs.len() {
             let expr = exprs[i];
+            self.style_now = scope.style;
             if self.para.trimmed().is_empty() {
                 self.para_style = scope.style;
             }
@@ -581,19 +618,13 @@ impl Walker<'_> {
                         .iter()
                         .filter_map(|&item| Some((item.to_untyped().clone(), item_body(item)?)))
                         .collect::<Vec<_>>();
-                    self.list(cx, &bodies, false, *scope);
+                    self.list(cx, &bodies, false, enumerated, *scope);
                     i = last + 1;
                     continue;
                 }
                 Expr::Equation(eq) if eq.block() => {
-                    self.flush();
-                    let follows = self.last == Last::Equation;
                     let label = label_after(exprs, i);
-                    self.emit(Block::Equation {
-                        loc: cx.loc(expr.to_untyped()),
-                        label,
-                        follows,
-                    });
+                    self.equation(cx.loc(expr.to_untyped()), label, scope, None);
                 }
                 Expr::Raw(raw) if raw.block() => {
                     self.flush();
@@ -630,8 +661,22 @@ impl Walker<'_> {
                     i = last + 1;
                     continue;
                 }
-                Expr::FuncCall(call) => self.call(cx, call, scope, label_after(exprs, i), true),
+                Expr::FuncCall(call) => {
+                    if self.para.trimmed().is_empty() && callee_name(call) == Some("h") {
+                        let file = self.code.files[cx.file].path.clone();
+                        let len = positional(call).first().map(|e| self.ev.eval_in(&file, *e));
+                        self.para_lead = Some(Start::H(match len {
+                            Some(Value::Length(l)) => Some(l),
+                            _ => None,
+                        }));
+                    }
+                    self.call(cx, call, scope, label_after(exprs, i), true)
+                }
+                Expr::Ident(_) | Expr::FieldAccess(_) if self.place(cx, expr, scope) => {}
                 _ if is_inline(expr) => {
+                    if self.para.trimmed().is_empty() && matches!(expr, Expr::Linebreak(_)) {
+                        self.para_lead = Some(Start::Break);
+                    }
                     let mut text = std::mem::take(&mut self.para);
                     self.inline(cx, expr, &mut text);
                     self.para = text;
@@ -640,6 +685,57 @@ impl Walker<'_> {
             }
             i += 1;
         }
+    }
+
+    /// `#назва` у розмітці, якщо це вміст з коду проєкту (`#let назва =
+    /// […]`, [`eval::Written`]): документ друкує цей код, тож він обходиться
+    /// там, де написаний. `false`, якщо значення не таке.
+    fn place(&mut self, cx: &Cx, expr: Expr, scope: &mut Scope) -> bool {
+        let path = self.code.files[cx.file].path.clone();
+        let value = self.ev.eval_in(&path, expr);
+        let items = value.items();
+        if !items.iter().any(|i| written(i).is_some()) {
+            return false;
+        }
+        let site = cx.loc(expr.to_untyped());
+        self.items(cx, &items, scope, &site, None, &mut None, true);
+        true
+    }
+
+    /// Вміст, набраний у коді проєкту: обходиться в його файлі, як `#[…]`.
+    fn written(&mut self, w: &eval::Written, scope: &mut Scope) {
+        // Вміст, що друкує сам себе, — лише раз
+        let key = (w.path.clone(), w.node.span());
+        if self.placing.contains(&key) {
+            return;
+        }
+        // Шляхи оцінювача нормалізовано, а шлях main-файлу — як передали
+        let file = match self
+            .code
+            .files
+            .iter()
+            .position(|f| normalize(&f.path) == w.path)
+        {
+            Some(file) => file,
+            None => {
+                let Some(source) = self.ev.source_of(&w.path) else {
+                    return;
+                };
+                self.code.files.push(SourceFile {
+                    path: w.path.clone(),
+                    source,
+                });
+                self.code.files.len() - 1
+            }
+        };
+        let Some(block) = w.node.cast::<ast::ContentBlock>() else {
+            return;
+        };
+        let cx = self.cx(file);
+        self.placing.push(key);
+        let mut inner = *scope;
+        self.markup(&cx, block.body(), &mut inner);
+        self.placing.pop();
     }
 
     /// Вирази блоку коду: `#show: шаблон` діє на решту блоку.
@@ -681,7 +777,7 @@ impl Walker<'_> {
                 if callee_path(set.target()).last() == Some(&"bibliography") {
                     self.bib(cx, set.args());
                 }
-                let file = self.doc.files[cx.file].path.clone();
+                let file = self.code.files[cx.file].path.clone();
                 if let Some(effect) = self.ev.set_in(&file, set) {
                     self.restyle(
                         scope,
@@ -704,7 +800,28 @@ impl Walker<'_> {
                     self.code_expr(cx, body, &mut scope.clone());
                 }
             }
-            Expr::ForLoop(f) => self.code_expr(cx, f.body(), &mut scope.clone()),
+            Expr::ForLoop(f) => {
+                // Цикл за відомими значеннями (масив, `range`, словник): тіло
+                // обходиться для кожного, як його надрукує typst
+                let file = self.code.files[cx.file].path.clone();
+                let values = eval::iterate(&self.ev.eval_in(&file, f.iterable()))
+                    .filter(|v| v.len() <= MAX_UNROLL);
+                match values {
+                    Some(values) => {
+                        for v in &values {
+                            let bound = eval::destructure(f.pattern(), v);
+                            for (name, value) in &bound {
+                                self.ev.bind_local(&file, name, value.clone());
+                            }
+                            self.code_expr(cx, f.body(), &mut scope.clone());
+                            for _ in &bound {
+                                self.ev.unbind_local();
+                            }
+                        }
+                    }
+                    None => self.code_expr(cx, f.body(), &mut scope.clone()),
+                }
+            }
             Expr::WhileLoop(w) => self.code_expr(cx, w.body(), &mut scope.clone()),
             Expr::Contextual(c) => self.code_expr(cx, c.body(), scope),
             // Визначення (`let`), імпорти, значення: друкованого вмісту не дають
@@ -730,19 +847,81 @@ impl Walker<'_> {
             .filter(|e| !matches!(e, Expr::Label(_)))
             .map(|e| e.to_untyped().full_text().to_string())
             .collect();
-        self.heading(Heading {
-            level: h.depth().get(),
-            title,
-            numbered: scope.numbered,
-            appendix: scope.appendix,
-            label,
-            loc,
-            generated: false,
-            markup: Some((cx.loc(h.to_untyped()), body.trim().to_owned())),
-        });
+        self.heading(
+            work::Heading {
+                level: h.depth().get(),
+                title,
+                numbered: scope.numbered,
+                appendix: scope.appendix,
+                label,
+                loc,
+                generated: false,
+                markup: Some((cx.loc(h.to_untyped()), body.trim().to_owned())),
+                look: None,
+                new_page: Fact::Unknown,
+                par_indent: Fact::Unknown,
+                printed: Fact::Unknown,
+            },
+            scope.style,
+            None,
+        );
     }
 
-    fn heading(&mut self, heading: Heading) {
+    /// Заголовок з налаштуваннями `heading.style`; `numbering`: явна
+    /// нумерація самого заголовка (`heading(numbering: none)`).
+    fn heading(&mut self, mut heading: work::Heading, style_at: usize, numbering: Option<Value>) {
+        let mut counts = Vec::new();
+        if !heading.generated || heading.markup.is_some() {
+            let style = self.styles[style_at].clone();
+            let node = look::Node::new(
+                "heading",
+                vec![
+                    ("level", Value::Int(heading.level as i64)),
+                    ("depth", Value::Int(heading.level as i64)),
+                    ("outlined", Value::Bool(true)),
+                ],
+            );
+            let numbering = numbering.or_else(|| {
+                look::prop(&style.chain, "heading", &node, &[], "numbering", true)
+                    .value()
+                    .map(|v| v.cloned().unwrap_or(Value::None))
+            });
+            // Лічильник: крок лише в нумерованих заголовках
+            match &numbering {
+                Some(Value::None) => {}
+                Some(_) => {
+                    if let Some(c) = &mut self.counters {
+                        c.resize(heading.level.max(c.len()), 0);
+                        c.truncate(heading.level);
+                        c[heading.level - 1] += 1;
+                        if c.iter().take(heading.level - 1).any(|&n| n == 0) {
+                            // Пропущений рівень: typst рахує його як 1? Не вгадуємо
+                        }
+                    }
+                }
+                None => self.counters = None,
+            }
+            let counters = self.counters.clone();
+            self.ev.set_heading(counters.clone());
+            let origins = self.origins(&heading.loc);
+            let look = look::heading(
+                &mut self.ev,
+                &style,
+                heading.level,
+                numbering.as_ref(),
+                counters.as_deref(),
+                &|s, a| origins.of(s, a),
+            );
+            let new_page = match (look.pagebreak, self.page_fresh) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (Some(false), Some(false)) => Some(false),
+                _ => None,
+            };
+            heading.new_page = Fact::computed(new_page, &heading.loc);
+            heading.look = Some(Box::new(look.look));
+            counts = look.counts;
+        }
+        heading.par_indent = Fact::computed(self.styles[style_at].indent_pt(), &heading.loc);
         match crate::rules::structural(heading.title.trimmed()) {
             Some((name, _)) if heading.level <= 2 => self.section = Some((name, heading.level)),
             _ if self
@@ -753,28 +932,47 @@ impl Walker<'_> {
             }
             _ => {}
         }
-        self.emit(Block::Heading(heading));
+        self.emit(
+            Element::Heading(heading),
+            Pending::Heading(style_at, counts),
+        );
     }
 
     /// Заголовок, який друкує шаблон.
     fn generated_heading(&mut self, title: &str, loc: Loc) {
         let mut text = Text::default();
         text.push_mapped(title, loc.file, loc.range.clone());
-        self.heading(Heading {
-            level: 1,
-            title: text,
-            numbered: false,
-            appendix: false,
-            label: None,
-            loc,
-            generated: true,
-            markup: None,
-        });
+        let new_page = Fact::computed((self.page_fresh == Some(true)).then_some(true), &loc);
+        self.heading(
+            work::Heading {
+                level: 1,
+                title: text,
+                numbered: false,
+                appendix: false,
+                label: None,
+                loc,
+                generated: true,
+                markup: None,
+                look: None,
+                new_page,
+                par_indent: Fact::Unknown,
+                printed: Fact::Unknown,
+            },
+            self.style_now,
+            None,
+        );
     }
 
     /// Перелік: тексти позицій без вкладених переліків; вкладені йдуть окремо
     /// після нього, без перевірки двокрапки.
-    fn list(&mut self, cx: &Cx, items: &[(SyntaxNode, ast::Markup)], nested: bool, scope: Scope) {
+    fn list(
+        &mut self,
+        cx: &Cx,
+        items: &[(SyntaxNode, ast::Markup)],
+        nested: bool,
+        enumerated: bool,
+        scope: Scope,
+    ) {
         let prev_par = match self.last {
             Last::Par(i) if !nested => Some(i),
             _ => None,
@@ -782,11 +980,21 @@ impl Walker<'_> {
         let mut out = Vec::new();
         let mut rest: Vec<Vec<(SyntaxNode, ast::Markup)>> = Vec::new();
         let mut blocks: Vec<Expr> = Vec::new();
+        // Виокремлені формули в позиціях: (формула, мітка, одразу за іншою)
+        let mut equations: Vec<(Expr, Option<Label>, bool)> = Vec::new();
         for (node, body) in items {
             let mut text = Text::default();
             let mut inner: Vec<(SyntaxNode, ast::Markup)> = Vec::new();
             let mut inner_enum = None;
-            for e in body.exprs() {
+            let exprs: Vec<Expr> = body.exprs().collect();
+            // Остання формула позиції, після якої лише проміжки й мітки
+            let mut after_equation = false;
+            for (k, &e) in exprs.iter().enumerate() {
+                match e {
+                    Expr::Space(_) | Expr::Label(_) => {}
+                    Expr::Equation(eq) if eq.block() => {}
+                    _ => after_equation = false,
+                }
                 match e {
                     Expr::ListItem(_) | Expr::EnumItem(_) => {
                         let is_enum = matches!(e, Expr::EnumItem(_));
@@ -800,7 +1008,10 @@ impl Walker<'_> {
                         }
                     }
                     Expr::Parbreak(_) => text.push_mapped(" ", cx.file, cx.range(e.to_untyped())),
-                    Expr::Equation(eq) if eq.block() => blocks.push(e),
+                    Expr::Equation(eq) if eq.block() => {
+                        equations.push((e, label_after(&exprs, k), after_equation));
+                        after_equation = true;
+                    }
                     Expr::FuncCall(call) if self.is_block_call(cx, call) => blocks.push(e),
                     Expr::FuncCall(_) => self.inline(cx, e, &mut text),
                     _ if is_inline(e) => self.inline(cx, e, &mut text),
@@ -817,14 +1028,39 @@ impl Walker<'_> {
             });
         }
         let section = self.section();
-        self.emit(Block::List(List {
-            items: out,
-            prev_par,
-            nested,
-            section,
-        }));
+        let style = self.styles[scope.style].clone();
+        let site = out
+            .first()
+            .map_or_else(|| self.code.anchor(), |i| i.loc.clone());
+        let origins = self.origins(&site);
+        let (marker, indent) = look::list(&mut self.ev, &style, enumerated, nested, &|s, a| {
+            origins.of_arg(s, a)
+        });
+        self.emit(
+            Element::List(work::List {
+                items: out,
+                prev_par,
+                nested,
+                section,
+                enumerated,
+                marker,
+                indent,
+                look: scope.style,
+            }),
+            Pending::None,
+        );
         for inner in rest {
-            self.list(cx, &inner, true, scope);
+            let enumerated = inner
+                .first()
+                .is_some_and(|(n, _)| n.kind() == typst_syntax::SyntaxKind::EnumItem);
+            self.list(cx, &inner, true, enumerated, scope);
+        }
+        // Формули з позицій ідуть за переліком, у своєму порядку
+        for (e, label, follows) in equations {
+            if !follows {
+                self.last = Last::Other;
+            }
+            self.equation(cx.loc(e.to_untyped()), label, &scope, None);
         }
         let mut scope = scope;
         for e in blocks {
@@ -858,7 +1094,19 @@ impl Walker<'_> {
                 out.push_mapped(if q.double() { "\"" } else { "'" }, cx.file, cx.range(node))
             }
             Expr::Strong(s) => self.inline_markup(cx, s.body(), out),
-            Expr::Emph(e) => self.inline_markup(cx, e.body(), out),
+            Expr::Emph(e) => {
+                let mut inner = Text::default();
+                self.inline_markup(cx, e.body(), &mut inner);
+                self.work.runs.push(work::Run {
+                    loc: cx.loc(e.to_untyped()),
+                    look: self.para_style,
+                    par: self.para_style,
+                    emph: true,
+                    text: inner.trimmed().to_owned(),
+                    element: self.work.elements.len(),
+                });
+                out.append(inner);
+            }
             Expr::Raw(raw) => {
                 let text: Vec<&str> = raw.lines().map(|l| l.get().as_str()).collect();
                 out.push_mapped(&text.join(" "), cx.file, cx.range(node));
@@ -873,7 +1121,17 @@ impl Walker<'_> {
             Expr::FuncCall(call) => self.inline_call(cx, call, out),
             Expr::ContentBlock(block) => self.inline_markup(cx, block.body(), out),
             Expr::Str(s) => out.push_mapped(&s.get(), cx.file, cx.range(node)),
-            // `#змінна`, `#x.y`, мітки, правила: тексту в коді немає
+            // `#змінна`, `#x.y`: текст, якщо значення відоме (змінна циклу,
+            // `#let назва = "…"`)
+            Expr::Ident(_) | Expr::FieldAccess(_) => {
+                let file = self.code.files[cx.file].path.clone();
+                // Так, як typst друкує значення: рядок, вміст, число
+                let printed = Value::Content(Rc::new(self.ev.eval_in(&file, expr).items()));
+                if let Some(t) = look::text_of(&printed) {
+                    out.push_mapped(&t, cx.file, cx.range(node));
+                }
+            }
+            // Мітки, правила: тексту в коді немає
             _ => {}
         }
     }
@@ -884,7 +1142,8 @@ impl Walker<'_> {
             // Текст виноски друкується внизу сторінки, а не в рядку
             Some("footnote") => {
                 if !matches!(positional(call).first(), Some(Expr::Label(_))) {
-                    self.doc.footnotes.push(cx.loc(call.to_untyped()));
+                    self.work.footnotes.at.push(cx.loc(call.to_untyped()));
+                    self.footnote_style.get_or_insert(self.para_style);
                 }
                 for arg in content_args(call) {
                     let mut ignored = Text::default();
@@ -909,10 +1168,55 @@ impl Walker<'_> {
                     self.inline(cx, arg, out);
                 }
             }
-            _ => {
+            Some("text") => {
+                let file = self.code.files[cx.file].path.clone();
+                let start = out.trimmed().is_empty();
+                let mut inner = Text::default();
                 for arg in content_args(call) {
+                    self.inline(cx, arg, &mut inner);
+                }
+                if let Some(effect) = self.ev.call_set_in(&file, call) {
+                    let mut scope = Scope {
+                        style: self.para_style,
+                        ..Scope::default()
+                    };
+                    let loc = cx.loc(call.to_untyped());
+                    self.restyle(&mut scope, Some(&[Effect::Set(effect)]), &loc);
+                    if start {
+                        self.para_inline.get_or_insert(scope.style);
+                    }
+                    self.work.runs.push(work::Run {
+                        loc,
+                        look: scope.style,
+                        par: self.para_style,
+                        emph: false,
+                        text: inner.trimmed().to_owned(),
+                        element: self.work.elements.len(),
+                    });
+                }
+                out.append(inner);
+            }
+            _ => {
+                let args = content_args(call);
+                // Виклик без вмісту прямо в тексті обчислює значення
+                // (`calc.max(…)`, `str(…)`): друкується, якщо це рядок чи число.
+                // В аргументах іншого виклику (`label(str(…))`) — ні
+                if args.is_empty() && !self.in_args {
+                    let file = self.code.files[cx.file].path.clone();
+                    let value = self.ev.eval_in(&file, Expr::FuncCall(call));
+                    if matches!(value, Value::Str(_) | Value::Int(_) | Value::Float(_))
+                        && let Some(t) = look::text_of(&Value::Content(Rc::new(value.items())))
+                    {
+                        out.push_mapped(&t, cx.file, cx.range(call.to_untyped()));
+                    }
+                }
+                let in_args = self.in_args;
+                for arg in args {
+                    // Блок вмісту — текст, що друкується; решта — значення
+                    self.in_args = !matches!(arg, Expr::ContentBlock(_));
                     self.inline(cx, arg, out);
                 }
+                self.in_args = in_args;
             }
         }
     }
@@ -931,7 +1235,7 @@ impl Walker<'_> {
         in_markup: bool,
     ) {
         self.keywords(cx, call.args());
-        let file = self.doc.files[cx.file].path.clone();
+        let file = self.code.files[cx.file].path.clone();
         match self.ev.callee_in(&file, call) {
             Callee::Builtin(name) => self.builtin_call(cx, call, &name, scope, label, in_markup),
             Callee::User => {
@@ -959,8 +1263,60 @@ impl Walker<'_> {
                     self.generic_call(cx, call, "", &mut inner, in_markup);
                 }
             }
-            Callee::Unknown => self.generic_call(cx, call, "", scope, in_markup),
+            Callee::Unknown => {
+                // `counter(heading).update(0)` у документі
+                if let Expr::FieldAccess(f) = call.callee()
+                    && matches!(f.field().as_str(), "update" | "step")
+                {
+                    let value = self.ev.eval_doc_in(&file, Expr::FuncCall(call));
+                    for item in value.items() {
+                        if let Part::Count(key, v) = item {
+                            self.count(&key, &v, &cx.loc(call.to_untyped()));
+                        }
+                    }
+                    return;
+                }
+                self.generic_call(cx, call, "", scope, in_markup)
+            }
         }
+    }
+
+    /// Виокремлена формула в `loc`; `numbering` — задана в самому виклику.
+    fn equation(
+        &mut self,
+        loc: Loc,
+        label: Option<Label>,
+        scope: &Scope,
+        numbering: Option<(Value, Loc)>,
+    ) {
+        self.flush();
+        let follows = self.last == Last::Equation;
+        // Оформлення формули обчислюється після обходу: її show-правила
+        // можуть залежати від посилань на неї
+        let look = Rc::new(work::EquationLook {
+            numbering: Fact::Unknown,
+            number_align: Fact::Unknown,
+            align: None,
+        });
+        let counter = self.counters.clone();
+        self.emit(
+            Element::Equation(work::Equation {
+                loc,
+                label,
+                follows,
+                referenced: false,
+                appendix: scope.appendix,
+                look,
+                chapter: counter.as_ref().and_then(|c| c.first().copied()),
+                number: Fact::Unknown,
+                number_gap: Fact::Unknown,
+            }),
+            Pending::Equation {
+                style: scope.style,
+                counter,
+                explicit: numbering,
+            },
+        );
     }
 
     /// Вбудована функція документа.
@@ -981,7 +1337,7 @@ impl Walker<'_> {
                 if name == "bibliography" {
                     self.bib(cx, call.args());
                 }
-                let file = self.doc.files[cx.file].path.clone();
+                let file = self.code.files[cx.file].path.clone();
                 let value = self.ev.eval_doc_in(&file, Expr::FuncCall(call));
                 let site = cx.loc(call.to_untyped());
                 let mut label = label;
@@ -990,6 +1346,18 @@ impl Walker<'_> {
                         self.elem(cx, &e, scope, label.take(), &site, true);
                     }
                 }
+            }
+            // `#math.equation(block: true)[…]`: як `$ … $`
+            "math.equation"
+                if named(call, "block").is_some_and(|b| {
+                    let file = self.code.files[cx.file].path.clone();
+                    matches!(self.ev.eval_in(&file, b), Value::Bool(true))
+                }) =>
+            {
+                let file = self.code.files[cx.file].path.clone();
+                let numbering = named(call, "numbering")
+                    .map(|n| (self.ev.eval_in(&file, n), cx.loc(n.to_untyped())));
+                self.equation(cx.loc(call.to_untyped()), label, scope, numbering);
             }
             _ => self.generic_call(cx, call, name, scope, in_markup),
         }
@@ -1009,7 +1377,7 @@ impl Walker<'_> {
             // Контейнер: його вміст складається з окремих абзаців
             self.flush();
             if matches!(name, "table" | "grid") {
-                let file = self.doc.files[cx.file].path.clone();
+                let file = self.code.files[cx.file].path.clone();
                 let value = self.ev.eval_doc_in(&file, Expr::FuncCall(call));
                 let site = cx.loc(call.to_untyped());
                 if let Some(table) = find_elem(&value, name) {
@@ -1019,7 +1387,7 @@ impl Walker<'_> {
             let mut inner = *scope;
             // `#text(size: 12pt)[…]`: налаштування для вмісту
             if matches!(name, "text" | "par" | "page") {
-                let file = self.doc.files[cx.file].path.clone();
+                let file = self.code.files[cx.file].path.clone();
                 if let Some(effect) = self.ev.call_set_in(&file, call) {
                     self.restyle(
                         &mut inner,
@@ -1028,9 +1396,16 @@ impl Walker<'_> {
                     );
                 }
             }
+            if name == "pagebreak" {
+                self.page_fresh = Some(true);
+            }
             for arg in content_args(call) {
                 self.code_expr(cx, arg, &mut inner);
                 self.flush();
+            }
+            // `page[…]` займає власні сторінки: далі нова
+            if name == "page" {
+                self.page_fresh = Some(true);
             }
             // Проміжок чи розрив сторінки між формулами не відокремлює їх
             // текстом (7.10.11)
@@ -1047,7 +1422,7 @@ impl Walker<'_> {
 
     /// Чи дає виклик блок (заголовок, рисунок, контейнер), а не текст у рядку.
     fn is_block_call(&mut self, cx: &Cx, call: ast::FuncCall) -> bool {
-        let file = self.doc.files[cx.file].path.clone();
+        let file = self.code.files[cx.file].path.clone();
         match self.ev.callee_in(&file, call) {
             Callee::Builtin(name) => {
                 is_block_name(&name) || matches!(name.as_str(), "heading" | "figure")
@@ -1102,11 +1477,38 @@ impl Walker<'_> {
         markup: bool,
     ) {
         for (k, item) in items.iter().enumerate() {
+            self.style_now = scope.style;
             match item {
-                Part::Text(t) => self.template_text.push_str(t),
+                Part::Text(t) => {
+                    if !t.trim().is_empty() {
+                        self.page_fresh = Some(false);
+                        if !self.seen_heading {
+                            self.title_style.get_or_insert(scope.style);
+                        }
+                    }
+                    self.template_text.push_str(t)
+                }
                 Part::Space => self.template_text.push(' '),
                 Part::Parbreak => self.flush_template(site),
-                Part::Unknown | Part::Label(_) => {}
+                Part::Pagebreak => {
+                    self.flush_template(site);
+                    self.flush();
+                    self.page_fresh = Some(true);
+                }
+                Part::H(_) => self.template_text.push(' '),
+                Part::Count(key, value) => self.count(key, value, site),
+                Part::Unknown => {
+                    if self.page_fresh == Some(true) {
+                        self.page_fresh = None;
+                    }
+                }
+                Part::Label(_) | Part::Hole | Part::Number => {}
+                // `context …` у вмісті шаблону: обчислюється тут, з лічильниками цього місця
+                Part::Ctx(_) => {
+                    let resolved = self.ev.resolve(std::slice::from_ref(item));
+                    let label = label.take();
+                    self.items(cx, &resolved, scope, site, label, rest, markup);
+                }
                 Part::Source(node) => {
                     self.flush_template(site);
                     self.walked += 1;
@@ -1133,15 +1535,22 @@ impl Walker<'_> {
                     self.flush();
                     self.last = Last::Other;
                 }
-                Part::Styled(effects, inner) => {
-                    let mut scope = *scope;
-                    self.restyle(&mut scope, Some(effects), site);
-                    let label = label.take();
-                    self.items(cx, inner, &mut scope, site, label, rest, markup);
-                }
+                Part::Styled(effects, inner) => match written(item) {
+                    Some(w) => {
+                        self.flush_template(site);
+                        self.walked += 1;
+                        self.written(w, scope);
+                    }
+                    None => {
+                        let mut scope = *scope;
+                        self.restyle(&mut scope, Some(effects), site);
+                        let label = label.take();
+                        self.items(cx, inner, &mut scope, site, label, rest, markup);
+                    }
+                },
                 Part::Maybe(inner) => {
                     if has_elem(inner, "bibliography") {
-                        self.doc.has_bibliography = true;
+                        self.work.has_bibliography = true;
                     }
                 }
                 Part::Elem(e) => {
@@ -1217,27 +1626,39 @@ impl Walker<'_> {
                 };
                 let generated = !doc && !body.is_some_and(|b| first_source(b).is_some());
                 let loc = title.whole().unwrap_or_else(|| site.clone());
-                self.heading(Heading {
-                    level,
-                    title,
-                    numbered,
-                    appendix: scope.appendix,
-                    label,
-                    loc,
-                    generated,
-                    markup: None,
-                });
+                let explicit = e.named("numbering").cloned();
+                self.heading(
+                    work::Heading {
+                        level,
+                        title,
+                        numbered,
+                        appendix: scope.appendix,
+                        label,
+                        loc,
+                        generated: false,
+                        markup: None,
+                        look: None,
+                        new_page: Fact::Unknown,
+                        par_indent: Fact::Unknown,
+                        printed: Fact::Unknown,
+                    },
+                    scope.style,
+                    explicit,
+                );
+                if generated && let Some(Element::Heading(h)) = self.work.elements.last_mut() {
+                    h.generated = true;
+                }
             }
             "figure" => {
                 self.flush();
                 self.last = Last::Other;
-                self.figure(cx, e, label, site);
+                self.figure(cx, e, label, site, *scope);
             }
             "bibliography" => {
                 self.flush();
                 // `full:` і `style:` перевіряються лише з коду документа: шаблон
                 // може сам друкувати перелік інакше (`show bibliography`)
-                self.doc.has_bibliography = true;
+                self.work.has_bibliography = true;
                 match e.named("title") {
                     Some(Value::None) => {}
                     Some(v @ (Value::Content(_) | Value::Str(_))) => {
@@ -1251,6 +1672,16 @@ impl Walker<'_> {
             }
             "outline" => {
                 self.flush();
+                if self.outline_style.is_none() {
+                    let style = self.styles[scope.style].clone();
+                    let origins = self.origins(site);
+                    self.outline_style = Some(look::inside(
+                        &mut self.ev,
+                        &style,
+                        "outline.entry",
+                        &|s, a| origins.of(s, a),
+                    ));
+                }
                 if !matches!(e.named("title"), Some(Value::None)) {
                     self.generated_heading("Зміст", site.clone());
                 }
@@ -1266,7 +1697,7 @@ impl Walker<'_> {
                     })
                     .collect();
                 if !items.is_empty() {
-                    self.list(cx, &items, false, *scope);
+                    self.list(cx, &items, false, e.func == "enum", *scope);
                 }
             }
             "table" | "grid" => {
@@ -1286,7 +1717,7 @@ impl Walker<'_> {
     /// `template`) на місці виклику.
     fn value_text(&mut self, cx: &Cx, value: &Value, site: &Loc, template: bool, out: &mut Text) {
         match value {
-            Value::Str(s) => self.str_text(cx, s, site, template, out),
+            Value::Str(s) => self.str_text(cx, s, site, out),
             Value::Content(items) => self.items_text(cx, items, site, template, out),
             _ => {}
         }
@@ -1294,8 +1725,8 @@ impl Walker<'_> {
 
     /// Рядок, що прийшов з коду документа (`fig(…, "Підпис")`): шукаємо його
     /// літерал у виклику, щоб текст мав місце в коді. Решта рядка (дописана
-    /// шаблоном) — на місці виклику, якщо `template`.
-    fn str_text(&mut self, cx: &Cx, s: &str, site: &Loc, template: bool, out: &mut Text) {
+    /// шаблоном чи обчислена) — на місці виклику.
+    fn str_text(&mut self, cx: &Cx, s: &str, site: &Loc, out: &mut Text) {
         let mut best: Option<(String, std::ops::Range<usize>, bool)> = None;
         str_literals(
             &LinkedNode::new(cx.root()),
@@ -1320,7 +1751,9 @@ impl Walker<'_> {
             }
             None => 0,
         };
-        if template || used == 0 {
+        // Решту дописав шаблон чи обчислив код (`"Слайд " + str(i)`): вона на
+        // місці виклику
+        if used < s.len() {
             out.push_mapped(&s[used..], site.file, site.range.clone());
         }
     }
@@ -1343,7 +1776,7 @@ impl Walker<'_> {
         }
     }
 
-    fn figure(&mut self, cx: &Cx, e: &Elem, label: Option<Label>, site: &Loc) {
+    fn figure(&mut self, cx: &Cx, e: &Elem, label: Option<Label>, site: &Loc, scope: Scope) {
         let body = e.args.pos.first().or_else(|| e.named("body"));
         // Посилання в тілі (клітинки таблиці, підписи всередині)
         if let Some(Value::Content(items)) = body {
@@ -1421,15 +1854,39 @@ impl Walker<'_> {
             .named("placement")
             .is_some_and(|p| !matches!(p, Value::None));
         let tick = self.next_tick();
-        self.emit(Block::Figure(Figure {
-            tick,
-            kind,
-            caption,
-            label,
-            header,
-            floating,
-            loc: site.clone(),
-        }));
+        let style = self.styles[scope.style].clone();
+        let origins = self.origins(site);
+        let kind_name = match kind {
+            FigureKind::Table => "table",
+            FigureKind::Image => "image",
+        };
+        // Нумерація самої фігури (`figure(numbering: …)`)
+        let explicit = e
+            .named("numbering")
+            .map(|n| (n.clone(), origins.site_origin()));
+        let (look, numbering) =
+            look::caption(&mut self.ev, &style, kind_name, explicit, &|s, a| {
+                origins.of_arg(s, a)
+            });
+        let counter = self.counters.clone();
+        self.emit(
+            Element::Figure(work::Figure {
+                tick,
+                kind,
+                caption,
+                label,
+                header,
+                floating,
+                loc: site.clone(),
+                look: Rc::new(look),
+                appendix: scope.appendix,
+                chapter: counter.as_ref().and_then(|c| c.first().copied()),
+                number: Fact::Unknown,
+                printed: Fact::Unknown,
+                split: Fact::Unknown,
+            }),
+            Pending::Figure(numbering, counter),
+        );
     }
 
     /// Що в тілі рисунка: таблиця, лістинг, зображення.
@@ -1473,7 +1930,7 @@ impl Walker<'_> {
             Expr::ContentBlock(b) => b.body().exprs().collect(),
             e => vec![e],
         };
-        let file = self.doc.files[cx.file].path.clone();
+        let file = self.code.files[cx.file].path.clone();
         let mut found = BodyKind::Image;
         for e in exprs {
             let kind = match e {
@@ -1573,10 +2030,13 @@ impl Walker<'_> {
                         ast::ArrayItem::Spread(_) => return,
                     }
                 }
-                self.emit(Block::Keywords {
-                    count,
-                    loc: cx.loc(array.to_untyped()),
-                });
+                self.emit(
+                    Element::Keywords {
+                        count,
+                        loc: cx.loc(array.to_untyped()),
+                    },
+                    Pending::None,
+                );
             }
             (_, Expr::Dict(dict)) => {
                 for item in dict.items() {
@@ -1599,13 +2059,13 @@ impl Walker<'_> {
             Some(e @ Expr::Str(s)) => Some((s.get().to_string(), cx.loc(e.to_untyped()))),
             _ => None,
         };
-        self.doc.bibs.push(Bib { full, style });
+        self.work.bibs.push(Bib { full, style });
     }
 
     /// Терміни переліку скорочень (лише в ньому).
     fn terms(&mut self, terms: Vec<Text>) {
         if self.section() == Some(crate::rules::ABBREVIATIONS) && terms.len() > 1 {
-            self.emit(Block::Terms(terms));
+            self.emit(Element::Terms(terms), Pending::None);
         }
     }
 
@@ -1624,7 +2084,7 @@ impl Walker<'_> {
                 _ => None,
             })
             .unzip();
-        self.doc.sets.push(SetRule {
+        self.code.sets.push(SetRule {
             target,
             args,
             values,
@@ -1651,7 +2111,7 @@ impl Walker<'_> {
                 self.record_set(cx, set, Some(name.clone()));
                 // `show par: set text(…)` діє на весь основний текст
                 if body {
-                    let file = self.doc.files[cx.file].path.clone();
+                    let file = self.code.files[cx.file].path.clone();
                     if let Some(effect) = self.ev.set_in(&file, set) {
                         self.restyle(
                             scope,
@@ -1663,8 +2123,15 @@ impl Walker<'_> {
             }
             // `show par: it => …`: абзаци змінено невідомо як
             _ if body => self.restyle(scope, None, &cx.loc(show.to_untyped())),
-            _ if name == "ref" => self.doc.custom_ref = true,
+            _ if name == "ref" => self.custom_ref = true,
             _ => {}
+        }
+        // Оформлення елемента (`show heading: …`, `show figure.caption: …`)
+        if !body {
+            let file = self.code.files[cx.file].path.clone();
+            if let Some(effect) = self.ev.show_effect_in(&file, show) {
+                self.restyle(scope, Some(&[effect]), &cx.loc(show.to_untyped()));
+            }
         }
     }
 
@@ -1693,13 +2160,13 @@ impl Walker<'_> {
             return;
         }
         let site = cx.loc(show.to_untyped());
-        if self.doc.template.is_none() {
-            self.doc.template = Some(site.clone());
+        if self.code.template.is_none() {
+            self.code.template = Some(site.clone());
         }
         if let Expr::FuncCall(call) = transform {
             self.keywords(cx, call.args());
         }
-        let file = self.doc.files[cx.file].path.clone();
+        let file = self.code.files[cx.file].path.clone();
         let shown = self.ev.show_in(&file, transform);
         let mut pending = Some(rest);
         self.items(
@@ -1724,56 +2191,218 @@ impl Walker<'_> {
     /// Нові налаштування для вмісту після `effects`; `None`: невідомо які
     /// (шаблону не простежити). `site`: що в документі їх застосовує.
     fn restyle(&mut self, scope: &mut Scope, effects: Option<&[Effect]>, site: &Loc) {
-        let mut style = self.doc.styles[scope.style].clone();
+        let mut style = self.styles[scope.style].clone();
         match effects {
             None => style.forget(),
             Some(effects) => {
                 for effect in effects {
-                    match effect {
-                        Effect::Opaque => style.forget(),
-                        Effect::Set(set) => {
-                            style.apply(set, &|arg: &SetArg| self.origin(set, arg, site));
-                            if set.target == "heading" {
-                                heading_set(scope, set);
-                            }
+                    style.apply_effect(effect, &|set: &SetEffect, arg: &SetArg| {
+                        self.origin(set, arg, site)
+                    });
+                    if let Effect::Set(set) = effect {
+                        if set.target == "heading" {
+                            heading_set(scope, set);
+                        }
+                        // `set page(…)` починає нову сторінку
+                        if set.target == "page" {
+                            self.page_fresh = Some(true);
                         }
                     }
                 }
             }
         }
-        self.doc.styles.push(style);
-        scope.style = self.doc.styles.len() - 1;
+        self.styles.push(style);
+        scope.style = self.styles.len() - 1;
     }
 
     /// Де задано аргумент `set`: у файлі документа чи (для шаблону поза
     /// документом) рядок, що застосовує шаблон.
     fn origin(&self, set: &SetEffect, arg: &SetArg, site: &Loc) -> Origin {
-        if let Some(file) = self.doc.files.iter().position(|f| f.path == set.path) {
-            let source = &self.doc.files[file].source;
-            let range = |span| source.find(span).map(|n| n.range());
-            if let Some(r) = range(set.span) {
-                return Origin {
-                    loc: Loc { file, range: r },
-                    value: range(arg.span).map(|range| Loc { file, range }),
-                    template: None,
-                };
+        self.origins(site).of(set, arg)
+    }
+
+    /// Номери сторінок: на титульному аркуші (абзаци до першого заголовка) і в
+    /// основному тексті.
+    fn page_look(&mut self) {
+        let elements = &self.work.elements;
+        // Без заголовків (презентація): усе — основний текст
+        let first = elements
+            .iter()
+            .position(|e| matches!(e, Element::Heading(_)));
+        let title = first.and(self.title_style);
+        let first = first.unwrap_or(0);
+        let body = elements
+            .get(first..)
+            .unwrap_or_default()
+            .iter()
+            .find_map(|e| match e {
+                Element::Par(p) => Some(p.look),
+                _ => None,
+            })
+            .or(match self.pending.get(first) {
+                Some(Pending::Heading(style, _)) => Some(*style),
+                _ => None,
+            })
+            // Документ без тексту (лише зображення): налаштування наприкінці
+            .unwrap_or(self.style_now);
+        let style = self.styles[body].clone();
+        let title = title.map(|t| self.styles[t].clone());
+        self.work.pages = Some(look::pages(&mut self.ev, &style, title.as_ref()));
+    }
+
+    /// Після обходу: оформлення формул (з посиланнями на них) і надруковані
+    /// номери рисунків, таблиць і формул з лічильниками typst.
+    fn numbers(&mut self) {
+        let mut refs = HashMap::new();
+        for (k, v) in &self.work.refs {
+            refs.insert(k.clone(), v.len());
+        }
+        for r in &self.work.ref_uses {
+            refs.entry(r.target.clone()).or_insert(1);
+        }
+        self.ev.set_refs(refs);
+        let anchor = self.code.anchor();
+        let origins = self.origins(&anchor);
+        // Лічильники фігур за видом і формул; `None`: значення не видно
+        let mut counters: HashMap<String, Option<i64>> = HashMap::new();
+        let pending = std::mem::take(&mut self.pending);
+        let mut elements = std::mem::take(&mut self.work.elements);
+        for (e, p) in elements.iter_mut().zip(&pending) {
+            match (e, p) {
+                (_, Pending::Counter(key, v)) => {
+                    let n = match v {
+                        Value::Int(n) => Some(*n),
+                        _ => None,
+                    };
+                    counters.insert(key.clone(), n);
+                }
+                (_, Pending::Heading(_, counts)) => {
+                    for (key, v) in counts {
+                        let n = match v {
+                            Value::Int(n) => Some(*n),
+                            _ => None,
+                        };
+                        counters.insert(key.clone(), n);
+                    }
+                }
+                (Element::Figure(f), Pending::Figure(numbering, counter)) => {
+                    let kind = match f.kind {
+                        FigureKind::Table => "figure:table",
+                        FigureKind::Image => "figure:image",
+                    };
+                    let Some(numbering) = numbering.known() else {
+                        counters.insert(kind.into(), None);
+                        continue;
+                    };
+                    if matches!(numbering, Value::None) {
+                        continue;
+                    }
+                    let n = counters.entry(kind.into()).or_insert(Some(0));
+                    *n = n.map(|n| n + 1);
+                    if let Some(n) = *n {
+                        self.ev.set_heading(counter.clone());
+                        let number = look::text_of(&self.ev.number(numbering, &[n]))
+                            .map(|t| t.trim().to_owned());
+                        f.number = Fact::computed(number, &f.loc);
+                    }
+                }
+                (
+                    Element::Equation(eq),
+                    Pending::Equation {
+                        style,
+                        counter,
+                        explicit,
+                    },
+                ) => {
+                    self.ev.set_heading(counter.clone());
+                    let style = self.styles[*style].clone();
+                    eq.referenced = match &eq.label {
+                        Some(Label::Name(n)) => self.work.refs.contains_key(n),
+                        Some(Label::Dynamic) => true,
+                        None => false,
+                    };
+                    let label = match &eq.label {
+                        Some(Label::Name(n)) => Some(n.as_str()),
+                        _ => None,
+                    };
+                    let explicit = explicit.as_ref().map(|(v, loc)| {
+                        (
+                            v.clone(),
+                            Origin {
+                                loc: loc.clone(),
+                                value: None,
+                                template: None,
+                            },
+                        )
+                    });
+                    let (look, numbering) =
+                        look::equation(&mut self.ev, &style, label, explicit, &|s, a| {
+                            origins.of_arg(s, a)
+                        });
+                    match numbering.known() {
+                        Some(Value::None) => {}
+                        Some(numbering) => {
+                            let n = counters.entry("math.equation".into()).or_insert(Some(0));
+                            *n = n.map(|n| n + 1);
+                            if let Some(n) = *n {
+                                let number = look::text_of(&self.ev.number(numbering, &[n]))
+                                    .map(|t| t.trim().to_owned());
+                                eq.number = Fact::computed(number, &eq.loc);
+                            }
+                        }
+                        None => {
+                            counters.insert("math.equation".into(), None);
+                        }
+                    }
+                    eq.look = Rc::new(look);
+                }
+                _ => {}
             }
         }
-        let shown = set
-            .path
-            .strip_prefix(&self.root)
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| {
-                set.path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            });
-        Origin {
-            loc: site.clone(),
-            value: None,
-            template: Some(shown),
+        self.work.elements = elements;
+        self.ev.set_heading(self.counters.clone());
+    }
+
+    /// Місця налаштувань для оформлення елемента біля `site`.
+    fn origins(&self, site: &Loc) -> Origins {
+        Origins {
+            files: self
+                .code
+                .files
+                .iter()
+                .map(|f| (f.path.clone(), f.source.clone()))
+                .collect(),
+            root: self.root.clone(),
+            // Правило з шаблону поза документом: зауваження стає на рядок,
+            // що застосовує шаблон
+            site: self.code.template.clone().unwrap_or_else(|| site.clone()),
         }
+    }
+
+    /// `counter(ціль).update(значення)`.
+    fn count(&mut self, key: &str, value: &Value, site: &Loc) {
+        if key == "page" {
+            self.work.page_updates.push(site.clone());
+            return;
+        }
+        if key != "heading" {
+            self.work.elements.push(Element::Counter);
+            self.pending
+                .push(Pending::Counter(key.to_owned(), value.clone()));
+            return;
+        }
+        self.counters = match value {
+            Value::Int(n) => Some(vec![*n]),
+            Value::Array(a) => a
+                .iter()
+                .map(|v| match v {
+                    Value::Int(n) => Some(*n),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        };
+        self.ev.set_heading(self.counters.clone());
     }
 
     fn include(&mut self, cx: &Cx, include: ast::ModuleInclude, scope: Scope) {
@@ -1783,7 +2412,7 @@ impl Walker<'_> {
         let path = path.get();
         let resolved = match path.strip_prefix('/') {
             Some(rel) => self.root.join(rel),
-            None => self.doc.files[cx.file]
+            None => self.code.files[cx.file]
                 .path
                 .parent()
                 .unwrap_or(&self.root)
@@ -1793,12 +2422,12 @@ impl Walker<'_> {
         if self.including.contains(&resolved) {
             return;
         }
-        let file = match self.doc.files.iter().position(|f| f.path == resolved) {
+        let file = match self.code.files.iter().position(|f| f.path == resolved) {
             Some(file) => file,
             None => match (self.load)(&resolved) {
                 Some(text) => self.add_file(resolved.clone(), text),
                 None => {
-                    self.doc
+                    self.code
                         .missing
                         .push((cx.loc(include.to_untyped()), resolved));
                     return;
@@ -1821,6 +2450,17 @@ fn item_body(e: Expr) -> Option<ast::Markup> {
     match e {
         Expr::ListItem(it) => Some(it.body()),
         Expr::EnumItem(it) => Some(it.body()),
+        _ => None,
+    }
+}
+
+/// Вміст, набраний у коді проєкту ([`eval::Written`]).
+fn written(item: &Part) -> Option<&eval::Written> {
+    match item {
+        Part::Styled(effects, _) => match effects.first() {
+            Some(Effect::Written(w)) => Some(w),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1867,6 +2507,67 @@ fn code_title(cx: &Cx, title: &mut Text, body: &SyntaxNode) {
             .trim();
         *title = Text::default();
         title.push_mapped(content, cx.file, cx.range(body));
+    }
+}
+
+/// Файли документа й місце застосування шаблону: де задано налаштування.
+struct Origins {
+    files: Vec<(PathBuf, Source)>,
+    root: PathBuf,
+    site: Loc,
+}
+
+impl Origins {
+    /// Місце вузла `span` у файлі `path`: у документі, а для шаблону поза
+    /// документом — місце його застосування й назва файлу шаблону.
+    fn at(
+        &self,
+        path: &Path,
+        span: typst_syntax::Span,
+        value: Option<typst_syntax::Span>,
+    ) -> Origin {
+        if let Some(file) = self.files.iter().position(|(p, _)| p == path) {
+            let source = &self.files[file].1;
+            let range = |span| source.find(span).map(|n| n.range());
+            if let Some(r) = range(span) {
+                return Origin {
+                    loc: Loc { file, range: r },
+                    value: value.and_then(range).map(|range| Loc { file, range }),
+                    template: None,
+                };
+            }
+        }
+        let shown = path
+            .strip_prefix(&self.root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        Origin {
+            loc: self.site.clone(),
+            value: None,
+            template: (!shown.is_empty()).then_some(shown),
+        }
+    }
+
+    fn of(&self, set: &SetEffect, arg: &SetArg) -> Origin {
+        self.at(&set.path, set.span, Some(arg.span))
+    }
+
+    /// Аргумент `arg` правила `set` (або саме правило).
+    fn of_arg(&self, set: &Rc<SetEffect>, arg: &str) -> Origin {
+        self.at(&set.path, set.span, set.arg(arg).map(|a| a.span))
+    }
+
+    /// Сам елемент: аргумент його виклику.
+    fn site_origin(&self) -> Origin {
+        Origin {
+            loc: self.site.clone(),
+            value: None,
+            template: None,
+        }
     }
 }
 
@@ -2091,6 +2792,7 @@ fn is_block_name(name: &str) -> bool {
     matches!(
         name,
         "align"
+            | "par"
             | "block"
             | "columns"
             | "colbreak"

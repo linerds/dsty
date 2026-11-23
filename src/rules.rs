@@ -1,4 +1,6 @@
-//! Правила ДСТУ 3008:2015 над моделлю документа.
+//! Правила ДСТУ 3008:2015 над нейтральною моделлю роботи ([`crate::work`]).
+//! З вихідного коду ([`crate::model::Code`]) вони беруть лише текст для
+//! виправлень і місце, де задати типове значення typst.
 //!
 //! Статичні правила перевіряють те, що видно з вихідного коду. Правила з
 //! позначкою `full` потребують компіляції (сторінки, стилі, відрендерені
@@ -8,10 +10,13 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+mod layout;
+pub mod looks;
+
 use crate::eval::MM;
-use crate::model::{Block, Doc, FigureKind, Heading, Label};
-use crate::style::Origin;
+use crate::model::Code;
 use crate::text::{Case, Loc, Text, ends_with_period, first_case, fmt_num, mm, quote, tail};
+use crate::work::{At, Element, Fact, FigureKind, Heading, Label, Par, Work};
 
 /// Рівень зауваження в редакторі.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
@@ -49,9 +54,6 @@ pub struct Rule {
     pub probes: u8,
     /// Статичне правило з повною частиною: без компіляції бачить не все.
     pub partial: bool,
-    /// Статична й повна частини перевіряють різне (основний текст і
-    /// заголовки), тож зауваження в одному рядку не дублюють одне одне.
-    pub split: bool,
     /// Рекомендація стандарту («рекомендовано»), а не вимога: у редакторі це
     /// інформація, а не попередження.
     pub advice: bool,
@@ -67,14 +69,9 @@ pub mod probe {
     pub const PAR: u8 = 2;
     /// Межі таблиць і їхні головки.
     pub const TABLE: u8 = 4;
-    /// Вирівнювання виокремлених формул.
-    pub const EQUATION: u8 = 8;
-    /// Кожен прогін основного тексту: відхилення посеред абзацу. Найдорожча
-    /// проба, тож лише для необов'язкового правила.
-    pub const RUNS: u8 = 16;
 }
 
-use probe::{EQUATION, PAR, RUNS, TABLE, TEXT};
+use probe::{PAR, TABLE, TEXT};
 
 const fn rule(code: &'static str, clause: &'static str, desc: &'static str) -> Rule {
     Rule {
@@ -85,7 +82,6 @@ const fn rule(code: &'static str, clause: &'static str, desc: &'static str) -> R
         full: false,
         probes: 0,
         partial: false,
-        split: false,
         advice: false,
         severity: Severity::Warning,
     }
@@ -109,13 +105,6 @@ impl Rule {
     const fn probes(mut self, probes: u8) -> Self {
         self.probes = probes;
         self.partial = true;
-        self
-    }
-
-    /// Статичне правило, повна частина якого перевіряє інше ([`Rule::split`]).
-    const fn split(mut self, probes: u8) -> Self {
-        self = self.probes(probes);
-        self.split = true;
         self
     }
 
@@ -154,13 +143,25 @@ impl Rule {
         out
     }
 
+    /// Вид перевірки: `static`, `full` або `static+full` (статичне правило,
+    /// частину якого бачить лише повна перевірка).
+    pub fn kind(&self) -> &'static str {
+        if self.full {
+            "full"
+        } else if self.partial {
+            "static+full"
+        } else {
+            "static"
+        }
+    }
+
     /// Позначки правила (Markdown): вид перевірки, чи вмикається окремо,
     /// чи це рекомендація.
     pub fn marks(&self) -> Vec<&'static str> {
-        let mut marks = vec![if self.full {
-            "повна перевірка (`--full`)"
-        } else {
-            "статична перевірка"
+        let mut marks = vec![match self.kind() {
+            "full" => "повна перевірка (`--full`)",
+            "static+full" => "статична перевірка, частину бачить лише повна (`--full`)",
+            _ => "статична перевірка",
         }];
         if self.optional {
             marks.push("вмикається через `enable`");
@@ -404,14 +405,12 @@ pub const RULES: &[Rule] = &[
         "footnote-numbering",
         "7.9.2",
         "Виноски позначають «1)» і нумерують у межах кожної сторінки",
-    )
-    .full(0),
+    ),
     rule(
         "footnote-separator",
         "7.9.5",
         "Виноску відокремлюють від тексту лінією завдовжки 30–40 мм",
-    )
-    .full(0),
+    ),
     rule(
         "abstract-length",
         "4.3.5",
@@ -437,8 +436,7 @@ pub const RULES: &[Rule] = &[
         "new-page",
         "4.2.1, 4.3.1, 4.4.1, 4.5.2, 4.6.2, 5.1.1, 5.3.1, 5.4.2, 5.5.1, 6.2.2",
         "Структурні елементи й додатки починають з нової сторінки",
-    )
-    .full(TEXT | PAR),
+    ),
     rule(
         "heading-orphan",
         "7.1.25",
@@ -449,76 +447,70 @@ pub const RULES: &[Rule] = &[
         "heading-style",
         "7.1.20",
         "Заголовки структурних елементів і розділів друкують великими літерами напівжирним",
-    )
-    .full(TEXT),
+    ),
     rule(
         "heading-indent",
         "7.1.21",
         "Заголовки підрозділів, пунктів і підпунктів друкують з абзацного відступу",
-    )
-    .full(TEXT),
+    ),
     rule(
         "heading-hyphen",
         "7.1.23",
         "Переносити слова в заголовках заборонено",
-    )
-    .full(TEXT),
+    ),
     rule(
         "contents-hyphen",
         "4.4.5",
         "Переносити слова у змісті не рекомендовано",
     )
-    .full(TEXT)
     .optional()
     .advice(),
     rule(
         "heading-number-format",
         "7.4.1–7.4.5, 7.15.2",
         "Номери розділів і підрозділів — арабськими цифрами через крапку без крапки в кінці; у додатках — з літерою",
-    )
-    .full(TEXT),
+    ),
     rule(
         "caption-supplement",
         "7.5.1, 7.6.1",
         "Підпис рисунка починають словом «Рисунок», таблиці — «Таблиця»",
-    )
-    .full(TEXT),
+    ),
     rule(
         "object-numbering",
         "7.5.6–7.5.8, 7.6.4–7.6.6, 7.15.3",
         "Рисунки й таблиці нумерують наскрізно або в межах розділу, у додатках — з літерою додатка",
-    )
-    .full(TEXT),
+    ),
     rule(
         "formula-numbering",
         "7.10.2–7.10.5",
         "Нумерують лише формули з посиланнями; номер у дужках у крайньому правому положенні, у додатках — з літерою",
     )
-    .full(TEXT),
+    .probes(TEXT),
     rule(
         "formula-center",
         "7.10.1",
         "Формули подають посередині рядка",
-    )
-    .full(EQUATION),
+    ),
     rule(
         "formula-where-indent",
         "7.10.6",
         "Пояснення познак подають безпосередньо під формулою, з нового рядка без абзацного відступу",
-    )
-    .full(PAR),
+    ),
     rule(
         "list-marker",
         "7.7.2",
         "Позиції переліку позначають «–», а переліки з посиланнями — «а)», «1)»",
-    )
-    .full(TEXT),
+    ),
+    rule(
+        "list-unreferenced",
+        "7.7.2",
+        "Переліки одного рівня, на позиції яких немає посилань, позначають «–», а не нумерують",
+    ),
     rule(
         "list-indent",
         "7.7.4",
         "Позиції переліку починають з абзацного відступу",
     )
-    .full(0)
     .optional(),
     rule(
         "page-size",
@@ -536,14 +528,12 @@ pub const RULES: &[Rule] = &[
         "page-number",
         "7.3.1, 7.3.3",
         "Номер сторінки — праворуч угорі арабськими цифрами без крапки, наскрізно; на титульному аркуші його не ставлять",
-    )
-    .full(0),
+    ),
     rule(
         "font-family",
         "7.1.5",
         "Звіт друкують шрифтом Times New Roman",
-    )
-    .split(TEXT),
+    ),
     rule(
         "font-missing",
         "7.1.5",
@@ -555,21 +545,18 @@ pub const RULES: &[Rule] = &[
         "font-size",
         "7.1.5, 7.9.6",
         "Основний текст і заголовки — кеглем 14, виноски — 12",
-    )
-    .split(TEXT | PAR),
+    ),
     rule(
         "font-style",
         "7.1.5",
         "Текст друкують чорним кольором прямого накреслення",
     )
-    .full(TEXT | RUNS)
     .optional(),
     rule(
         "line-spacing",
         "7.1.5, 7.9.6",
         "Текст друкують через 1,5–2 міжрядкові інтервали, виноски — через один",
-    )
-    .split(PAR),
+    ),
     rule(
         "par-indent",
         "7.1.22",
@@ -580,26 +567,23 @@ pub const RULES: &[Rule] = &[
         "7.8.3",
         "Примітку друкують кеглем 12 через один міжрядковий інтервал",
     )
-    .full(PAR),
+,
     rule(
         "appendix-letter",
         "6.2.2, 7.15.1",
         "Над заголовком додатка — «ДОДАТОК» і літера: А, Б, В… (крім Ґ, Є, З, І, Ї, Й, О, Ч, Ь)",
-    )
-    .full(TEXT),
+    ),
     rule(
         "caption-position",
         "7.5.9, 7.6.8",
         "Назву рисунка розміщують під ним посередині рядка, таблиці — над нею з абзацного відступу",
     )
-    .full(TEXT)
     .optional(),
     rule(
         "caption-separator",
         "7.5.7, 7.6.5",
         "Номер і назву в підписі розділяють тире: «Рисунок 2.1 — Схема устатковання»",
-    )
-    .full(TEXT),
+    ),
 ];
 
 pub fn find(code: &str) -> Option<&'static Rule> {
@@ -887,6 +871,15 @@ static HEADING_ABBREV: LazyLock<Regex> = LazyLock::new(|| {
 });
 /// Роздільник терміна й розшифрування в переліку скорочень.
 static TERM_SEPARATOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+[–—-]+\s+|:\s").unwrap());
+/// Посилання на позицію переліку в тексті: «у пункті 2)», «позиції а)–в)»,
+/// «(див. б))», «крок 3». Літеру без дужки за посилання не вважаємо: «див. в
+/// розділі».
+static LIST_REF: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(?:перелік|позиці|пункт|підпункт|\bпп?\.|\bдив\.|крок)\w*\.?\s+\(?(?:(\d{1,2})(?:\)|\.|\b)|(\p{L})\))",
+    )
+    .unwrap()
+});
 static WHERE_COLON: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[Дд]е\s*:").unwrap());
 /// Початок примітки: слово, номер, знак після них і перша літера тексту.
 static NOTE: LazyLock<Regex> = LazyLock::new(|| {
@@ -894,20 +887,24 @@ static NOTE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub struct Checker<'a> {
-    doc: &'a Doc,
+    code: &'a Code,
+    work: &'a Work,
     active: &'a dyn Fn(&str) -> bool,
     out: Vec<Found>,
 }
 
-pub fn run(doc: &Doc, active: &dyn Fn(&str) -> bool) -> Vec<Found> {
+/// Правила над роботою `work`; `code` — її вихідний код (місця й виправлення).
+pub fn run(work: &Work, code: &Code, active: &dyn Fn(&str) -> bool) -> Vec<Found> {
     let mut checker = Checker {
-        doc,
+        code,
+        work,
         active,
         out: Vec::new(),
     };
     checker.headings();
     checker.figures();
     checker.lists();
+    checker.unreferenced_lists();
     checker.paragraphs();
     checker.notes();
     checker.keywords();
@@ -917,12 +914,33 @@ pub fn run(doc: &Doc, active: &dyn Fn(&str) -> bool) -> Vec<Found> {
     checker.citations();
     checker.formulas();
     checker.styles();
+    checker.looks();
+    checker.out
+}
+
+/// Правила над фактами розкладки (повна перевірка): що де стоїть на
+/// сторінках, як typst чи шаблон надрукували номери й назви.
+pub fn run_layout(work: &Work, code: &Code, active: &dyn Fn(&str) -> bool) -> Vec<Found> {
+    let mut checker = Checker {
+        code,
+        work,
+        active,
+        out: Vec::new(),
+    };
+    checker.layout();
     checker.out
 }
 
 impl Checker<'_> {
-    fn add(&mut self, code: &str, loc: Option<Loc>, msg: String, fixes: Vec<FixDraft>) {
-        self.add_in(None, code, loc, msg, fixes);
+    /// Додає зауваження, якщо правило ввімкнене; повертає його.
+    fn add(
+        &mut self,
+        code: &str,
+        loc: Option<Loc>,
+        msg: String,
+        fixes: Vec<FixDraft>,
+    ) -> Option<&mut Found> {
+        self.add_in(None, code, loc, msg, fixes)
     }
 
     fn add_in(
@@ -932,16 +950,17 @@ impl Checker<'_> {
         loc: Option<Loc>,
         msg: String,
         fixes: Vec<FixDraft>,
-    ) {
+    ) -> Option<&mut Found> {
         if !(self.active)(code) {
-            return;
+            return None;
         }
         let (Some(rule), Some(loc)) = (find(code), loc) else {
-            return;
+            return None;
         };
         let mut found = Found::new(rule, loc, msg, fixes);
         found.group = group;
         self.out.push(found);
+        self.out.last_mut()
     }
 
     /// Пов'язане місце для щойно доданого зауваження правила `code`.
@@ -959,7 +978,7 @@ impl Checker<'_> {
             None => Ok(None),
             Some(Label::Dynamic) => Err(()),
             Some(Label::Name(name)) => Ok(self
-                .doc
+                .work
                 .refs
                 .get(name)
                 .and_then(|refs| refs.first().copied())),
@@ -971,12 +990,12 @@ impl Checker<'_> {
         let mut open: Vec<(&Heading, Vec<&Heading>)> = Vec::new();
         let mut latest: Option<(u8, String, Loc)> = None;
         let mut appendices: Vec<&Heading> = Vec::new();
-        let doc = self.doc;
+        let (work, code) = (self.work, self.code);
 
         let mut present: Vec<&str> = Vec::new();
         let mut chapters = false;
-        for block in &doc.blocks {
-            let Block::Heading(h) = block else { continue };
+        for block in &work.elements {
+            let Element::Heading(h) = block else { continue };
             let title = h.title.trimmed().to_owned();
 
             if title.is_empty() && h.level <= 2 && !h.generated {
@@ -1072,10 +1091,7 @@ impl Checker<'_> {
                 // зсередини переходить за виклик
                 let fix = h.markup.as_ref().map(|(node, body)| {
                     let label = match &h.label {
-                        Some(Label::Name(l))
-                            if doc.files[node.file].source.text()[node.range.clone()]
-                                .contains(&format!("<{l}>")) =>
-                        {
+                        Some(Label::Name(l)) if code.text(node).contains(&format!("<{l}>")) => {
                             format!(" <{l}>")
                         }
                         _ => String::new(),
@@ -1139,7 +1155,7 @@ impl Checker<'_> {
 
         // Обов'язкові елементи (3.5.1): титульний аркуш і суть з коду видно не завжди,
         // тож перевіряються реферат, вступ, висновки й наявність розділів
-        let anchor = doc.anchor();
+        let anchor = code.anchor();
         for (name, shown) in [
             ("реферат", "«Реферат»"),
             ("вступ", "«Вступ»"),
@@ -1219,9 +1235,9 @@ impl Checker<'_> {
     }
 
     fn figures(&mut self) {
-        let doc = self.doc;
-        for block in &doc.blocks {
-            let Block::Figure(f) = block else { continue };
+        let work = self.work;
+        for block in &work.elements {
+            let Element::Figure(f) = block else { continue };
             let (mut name, mut name_acc) = match f.kind {
                 FigureKind::Image => ("рисунок".to_owned(), "рисунок".to_owned()),
                 FigureKind::Table => ("таблиця".to_owned(), "таблицю".to_owned()),
@@ -1267,7 +1283,7 @@ impl Checker<'_> {
                         Vec::new(),
                     );
                     if let Some(Label::Name(label)) = &f.label
-                        && let Some(r) = doc.ref_uses.iter().find(|r| &r.target == label)
+                        && let Some(r) = work.ref_uses.iter().find(|r| &r.target == label)
                     {
                         self.relate("figure-before-ref", r.loc.clone(), "перше посилання");
                     }
@@ -1303,9 +1319,9 @@ impl Checker<'_> {
     }
 
     fn lists(&mut self) {
-        let doc = self.doc;
-        for (id, block) in doc.blocks.iter().enumerate() {
-            let Block::List(list) = block else { continue };
+        let work = self.work;
+        for (id, block) in work.elements.iter().enumerate() {
+            let Element::List(list) = block else { continue };
             // Записи переліку джерел оформлюють за ДСТУ 8302, а перелік
             // скорочень за 7.14, а не за 7.7
             if matches!(list.section, Some(BIBLIOGRAPHY | ABBREVIATIONS)) {
@@ -1454,7 +1470,7 @@ impl Checker<'_> {
                 }
             }
 
-            let Some(Block::Par(par)) = list.prev_par.map(|i| &doc.blocks[i]) else {
+            let Some(Element::Par(par)) = list.prev_par.map(|i| &work.elements[i]) else {
                 continue;
             };
             let text = par.text.trimmed();
@@ -1492,15 +1508,124 @@ impl Checker<'_> {
         }
     }
 
+    /// 7.7.2: нумерують лише переліки, на позиції яких посилаються; перелік
+    /// одного рівня без посилань позначають «–». Посилання шукаємо в тексті
+    /// абзаців і позицій інших переліків і віддаємо найближчому нумерованому
+    /// переліку, у якого є така позиція.
+    fn unreferenced_lists(&mut self) {
+        let work = self.work;
+        let dash = ["–", "—", "-", "−", "‒"];
+        // Нумеровані переліки, крім уже позначених «–»: (індекс елемента, перелік)
+        let enums: Vec<(usize, &crate::work::List)> = work
+            .elements
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| match e {
+                Element::List(l)
+                    if l.enumerated
+                        && !matches!(l.section, Some(BIBLIOGRAPHY | ABBREVIATIONS))
+                        && !matches!(&l.marker, Fact::Known(m, _) if dash.contains(&m.as_str())) =>
+                {
+                    Some((i, l))
+                }
+                _ => None,
+            })
+            .collect();
+        if enums.is_empty() {
+            return;
+        }
+        // Чи має перелік позицію, яку названо в посиланні
+        let has = |l: &crate::work::List, num: Option<u32>, letter: bool| {
+            let n = l.items.len() as u32;
+            match (l.marker.known().map(String::as_str), num) {
+                (Some(m), Some(k)) if m.starts_with(|c: char| c.is_ascii_digit()) => {
+                    let start: u32 = m
+                        .chars()
+                        .take_while(char::is_ascii_digit)
+                        .collect::<String>()
+                        .parse()
+                        .unwrap_or(1);
+                    (start..start + n).contains(&k)
+                }
+                (Some(m), _) if m.starts_with(char::is_alphabetic) => letter,
+                (Some(_), _) => false,
+                (None, Some(k)) => (1..=n).contains(&k),
+                (None, None) => letter,
+            }
+        };
+        let mut referenced = vec![false; enums.len()];
+        let mut mark = |at: usize, text: &str| {
+            for c in LIST_REF.captures_iter(text) {
+                let num = c.get(1).and_then(|m| m.as_str().parse().ok());
+                let letter = c.get(2).is_some();
+                let closest = enums
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (i, l))| *i != at && has(l, num, letter))
+                    .min_by_key(|(_, (i, _))| i.abs_diff(at));
+                if let Some((k, _)) = closest {
+                    referenced[k] = true;
+                }
+            }
+        };
+        for (i, e) in work.elements.iter().enumerate() {
+            match e {
+                Element::Par(p) => mark(i, p.text.as_str()),
+                Element::List(l) => l.items.iter().for_each(|it| mark(i, it.text.as_str())),
+                _ => {}
+            }
+        }
+        for (k, &(_, list)) in enums.iter().enumerate() {
+            if referenced[k] || list.nested || list.items.iter().any(|i| i.has_nested) {
+                continue;
+            }
+            let Some(first) = list.items.first() else {
+                continue;
+            };
+            // Позначки в коді: `+` чи `1.` на початку кожної позиції
+            let source = self.code.files[first.loc.file].source.text();
+            let marker = |loc: &Loc| {
+                let rest = source.get(loc.range.clone())?;
+                let len = if rest.starts_with('+') {
+                    1
+                } else {
+                    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+                    (digits > 0 && rest[digits..].starts_with('.')).then_some(digits + 1)?
+                };
+                Some(Loc {
+                    file: loc.file,
+                    range: loc.range.start..loc.range.start + len,
+                })
+            };
+            let marks: Vec<Loc> = list.items.iter().filter_map(|i| marker(&i.loc)).collect();
+            let fix = (marks.len() == list.items.len()).then(|| FixDraft {
+                title: "Позначити позиції «–»".into(),
+                edits: marks.iter().map(|m| (m.clone(), "-".into())).collect(),
+            });
+            let shown = match &list.marker {
+                Fact::Known(m, _) => format!("«{m}»"),
+                Fact::Unknown => "номерами".into(),
+            };
+            self.add(
+                "list-unreferenced",
+                marks.first().cloned().or(Some(first.loc.clone())),
+                format!(
+                    "позиції переліку позначено {shown}, але посилань на них немає: такі переліки позначають «–»"
+                ),
+                fix.into_iter().collect(),
+            );
+        }
+    }
+
     fn paragraphs(&mut self) {
-        let doc = self.doc;
-        let has_bibliography = doc.has_bibliography
-            || doc.blocks.iter().any(|b| {
-                matches!(b, Block::Heading(h) if structural(h.title.trimmed()).is_some_and(|(n, _)| n == BIBLIOGRAPHY))
+        let work = self.work;
+        let has_bibliography = work.has_bibliography
+            || work.elements.iter().any(|b| {
+                matches!(b, Element::Heading(h) if structural(h.title.trimmed()).is_some_and(|(n, _)| n == BIBLIOGRAPHY))
             });
         let mut cited = false;
-        for block in &doc.blocks {
-            let Block::Par(par) = block else { continue };
+        for block in &work.elements {
+            let Element::Par(par) = block else { continue };
             if par.section == Some(BIBLIOGRAPHY) {
                 continue;
             }
@@ -1608,7 +1733,7 @@ impl Checker<'_> {
 
     /// Примітка (7.8.3, 7.8.4): «Примітка.» або «Примітка 1.», далі текст з
     /// великої літери.
-    fn note(&mut self, par: &crate::model::Par) {
+    fn note(&mut self, par: &Par) {
         let start = par.text.trimmed_range().start;
         let Some(c) = NOTE.captures(par.text.trimmed()) else {
             return;
@@ -1684,13 +1809,12 @@ impl Checker<'_> {
     /// Нумерація приміток (7.8.3, 7.8.4): одну не нумерують, кілька поспіль
     /// нумерують по порядку.
     fn notes(&mut self) {
-        let doc = self.doc;
+        let work = self.work;
         // Примітки поспіль: (абзац, слово, номер)
-        let mut runs: Vec<Vec<(&crate::model::Par, regex::Match, Option<regex::Match>)>> =
-            Vec::new();
+        let mut runs: Vec<Vec<(&Par, regex::Match, Option<regex::Match>)>> = Vec::new();
         let mut prev: Option<usize> = None;
-        for (i, block) in doc.blocks.iter().enumerate() {
-            let Block::Par(par) = block else { continue };
+        for (i, block) in work.elements.iter().enumerate() {
+            let Element::Par(par) = block else { continue };
             let Some(c) = NOTE.captures(par.text.trimmed()) else {
                 continue;
             };
@@ -1759,13 +1883,13 @@ impl Checker<'_> {
     }
 
     fn keywords(&mut self) {
-        let doc = self.doc;
-        for block in &doc.blocks {
+        let work = self.work;
+        for block in &work.elements {
             match block {
                 // Шаблон сам розставляє ключові слова за абеткою
-                Block::Keywords { count, loc } => self.keywords_count(*count, loc.clone()),
+                Element::Keywords { count, loc } => self.keywords_count(*count, loc.clone()),
                 // Набрані вручну: рядок великими літерами через кому в рефераті
-                Block::Par(par) if par.section == Some(ABSTRACT) => {
+                Element::Par(par) if par.section == Some(ABSTRACT) => {
                     let text = par.text.trimmed();
                     let letters = || text.chars().filter(|c| c.is_alphabetic());
                     if text.matches(',').count() < 2
@@ -1827,7 +1951,7 @@ impl Checker<'_> {
     /// Перелік скорочень за абеткою (7.14): терміни (`/ ЕОМ: …`), перша
     /// колонка таблиці, позиції переліку чи абзаци «ЕОМ – …» поспіль.
     fn abbreviations(&mut self) {
-        let doc = self.doc;
+        let work = self.work;
         let mut groups: Vec<Vec<(String, Loc)>> = Vec::new();
         let mut prev_par: Option<usize> = None;
         let term = |text: &Text| -> Option<(String, Loc)> {
@@ -1847,13 +1971,13 @@ impl Checker<'_> {
                 .flatten()
                 .map(|loc| (s.to_owned(), loc))
         };
-        for (i, block) in doc.blocks.iter().enumerate() {
+        for (i, block) in work.elements.iter().enumerate() {
             match block {
-                Block::Terms(terms) => groups.push(terms.iter().filter_map(whole).collect()),
-                Block::List(list) if list.section == Some(ABBREVIATIONS) && !list.nested => {
+                Element::Terms(terms) => groups.push(terms.iter().filter_map(whole).collect()),
+                Element::List(list) if list.section == Some(ABBREVIATIONS) && !list.nested => {
                     groups.push(list.items.iter().filter_map(|it| term(&it.text)).collect());
                 }
-                Block::Par(par) if par.section == Some(ABBREVIATIONS) => {
+                Element::Par(par) if par.section == Some(ABBREVIATIONS) => {
                     let Some(entry) = term(&par.text) else {
                         continue;
                     };
@@ -1886,8 +2010,8 @@ impl Checker<'_> {
 
     /// `bibliography`: лише джерела з посиланнями й номерні посилання (5.5.1).
     fn bibliographies(&mut self) {
-        let doc = self.doc;
-        for bib in &doc.bibs {
+        let work = self.work;
+        for bib in &work.bibs {
             if let Some(loc) = &bib.full {
                 self.add(
                     "bibliography-full",
@@ -1920,25 +2044,25 @@ impl Checker<'_> {
     /// великої літери в називному відмінку, тож посеред речення його не
     /// лишають, а слово перед посиланням не повторюють.
     fn refs(&mut self) {
-        let doc = self.doc;
+        let (work, code) = (self.work, self.code);
         // Власне show-правило `ref` чи `set ref(supplement: …)`: як друкується
         // посилання, з коду не видно
-        if doc.custom_ref || doc.set_rule("ref", "supplement").is_some() {
+        if work.ref_style.custom {
             return;
         }
         let mut kinds: std::collections::HashMap<&str, RefKind> = Default::default();
-        for block in &doc.blocks {
+        for block in &work.elements {
             let (label, kind) = match block {
-                Block::Figure(f) => (
+                Element::Figure(f) => (
                     &f.label,
                     match f.kind {
                         FigureKind::Image => RefKind::Image,
                         FigureKind::Table => RefKind::Table,
                     },
                 ),
-                Block::Equation { label, .. } => (label, RefKind::Equation),
-                Block::Heading(h) if h.appendix && h.level == 1 => (&h.label, RefKind::Appendix),
-                Block::Heading(h) => (&h.label, RefKind::Section),
+                Element::Equation(q) => (&q.label, RefKind::Equation),
+                Element::Heading(h) if h.appendix && h.level == 1 => (&h.label, RefKind::Appendix),
+                Element::Heading(h) => (&h.label, RefKind::Section),
                 _ => continue,
             };
             if let Some(Label::Name(name)) = label {
@@ -1947,18 +2071,10 @@ impl Checker<'_> {
         }
         // Підпис, заданий документом (`set figure(supplement: [рис.])`),
         // може бути з малої літери: тоді регістр не перевіряється
-        let lowercase = |target: &str| {
-            doc.set_rule(target, "supplement")
-                .and_then(|s| s.value("supplement"))
-                .is_some_and(|v| {
-                    let v = v.trim_start_matches(['[', '"', '(']);
-                    v == "none" || v.starts_with(char::is_lowercase)
-                })
-        };
-        let figure_lower = lowercase("figure");
-        let equation_lower = lowercase("math.equation");
-        let heading_lower = lowercase("heading");
-        for r in &doc.ref_uses {
+        let figure_lower = work.ref_style.lower_figure;
+        let equation_lower = work.ref_style.lower_equation;
+        let heading_lower = work.ref_style.lower_heading;
+        for r in &work.ref_uses {
             if r.supplement {
                 continue;
             }
@@ -1981,7 +2097,7 @@ impl Checker<'_> {
             let node = r.loc.clone();
             let shown = format!("@{}", r.target);
             // Лише `@мітка`: у `ref(<мітка>)` дописати `[]` нікуди
-            let bare = doc.files[node.file].source.text()[node.range.clone()].starts_with('@');
+            let bare = code.text(&node).starts_with('@');
             let at_end = Loc {
                 file: node.file,
                 range: node.range.end..node.range.end,
@@ -1990,7 +2106,7 @@ impl Checker<'_> {
                 // Слово вже є: друкується «рисунку Рисунок 2.1». Слово переходить у
                 // підпис посилання: `@fig[рисунку]` друкує «рисунку 2.1», і
                 // посиланням стає весь вираз
-                let text = doc.files[node.file].source.text();
+                let text = code.file_text(&node);
                 let lead = text[..node.range.start].trim_end_matches([' ', '\t', '~', '\n']);
                 let fix = (bare && lead.ends_with(word)).then(|| FixDraft {
                     title: format!("У посилання: {shown}[{word}]"),
@@ -2049,16 +2165,16 @@ impl Checker<'_> {
     /// нумерують за першою згадкою, тож нові номери йдуть 1, 2, 3, … Джерела
     /// додатків нумерують окремо (7.15.5), тож додатки не перевіряються.
     fn citations(&mut self) {
-        let doc = self.doc;
+        let work = self.work;
         let mut seen = 0u32;
-        for block in &doc.blocks {
+        for block in &work.elements {
             let texts: Vec<&Text> = match block {
-                Block::Heading(h) if h.appendix => break,
-                Block::Par(p) if p.section != Some(BIBLIOGRAPHY) => vec![&p.text],
-                Block::List(l) if !matches!(l.section, Some(BIBLIOGRAPHY | ABBREVIATIONS)) => {
+                Element::Heading(h) if h.appendix => break,
+                Element::Par(p) if p.section != Some(BIBLIOGRAPHY) => vec![&p.text],
+                Element::List(l) if !matches!(l.section, Some(BIBLIOGRAPHY | ABBREVIATIONS)) => {
                     l.items.iter().map(|i| &i.text).collect()
                 }
-                Block::Figure(f) => f.caption.iter().collect(),
+                Element::Figure(f) => f.caption.iter().collect(),
                 _ => continue,
             };
             for text in texts {
@@ -2089,20 +2205,16 @@ impl Checker<'_> {
 
     /// Кілька формул поспіль без тексту між ними розділяють комами (7.10.11).
     fn formulas(&mut self) {
-        let doc = self.doc;
-        for pair in doc.blocks.windows(2) {
-            let [
-                Block::Equation { loc, .. },
-                Block::Equation {
-                    loc: next,
-                    follows: true,
-                    ..
-                },
-            ] = pair
-            else {
+        let code = self.code;
+        for pair in self.work.elements.windows(2) {
+            let [Element::Equation(q), Element::Equation(n)] = pair else {
                 continue;
             };
-            let text = &doc.files[loc.file].source.text()[loc.range.clone()];
+            if !n.follows {
+                continue;
+            }
+            let (loc, next) = (&q.loc, &n.loc);
+            let text = code.text(loc);
             let Some(body) = text.strip_prefix('$').and_then(|t| t.strip_suffix('$')) else {
                 continue;
             };
@@ -2332,14 +2444,7 @@ type Pending = (&'static str, Loc, String, Vec<FixDraft>, usize, usize);
 /// шрифту, інтервалу, відступу й формату; решту бачить повна перевірка).
 impl Checker<'_> {
     fn styles(&mut self) {
-        let doc = self.doc;
-        // Документ без жодного налаштування тексту чи сторінки й без шаблону
-        // найімовірніше є фрагментом (розділ, відкритий окремо): типові
-        // значення typst до нього не стосуються
-        let configured = doc.template.is_some()
-            || doc.sets.iter().any(|s| {
-                s.selector.is_none() && matches!(s.target.as_str(), "page" | "text" | "par")
-            });
+        let (work, source) = (self.work, self.code);
         let mut all = Vec::new();
         let mut body = Vec::new();
         // Абзаци з абзацним відступом: «де …» і примітки друкують без нього
@@ -2348,31 +2453,32 @@ impl Checker<'_> {
         let mut after_block = Vec::new();
         let mut started = false;
         let mut prev_par = false;
-        for block in &doc.blocks {
-            match block {
-                Block::Heading(_) => started = true,
-                Block::Par(p) => {
-                    all.push(p.style);
+        for e in &work.elements {
+            match e {
+                Element::Heading(_) => started = true,
+                Element::Par(p) => {
+                    all.push(p.look);
                     // Основний текст: після першого заголовка (не титульний аркуш)
                     let head = p.text.trimmed().to_lowercase();
                     let unindented =
                         head == "де" || head.starts_with("де ") || head.starts_with("примітк");
-                    if started {
-                        body.push(p.style);
+                    // Примітки мають власний кегль і інтервал (`note-size`)
+                    if started && !head.starts_with("примітк") {
+                        body.push(p.look);
                         if !unindented {
-                            indented.push(p.style);
+                            indented.push(p.look);
                             if !prev_par {
-                                after_block.push(p.style);
+                                after_block.push(p.look);
                             }
                         }
                     }
                 }
-                Block::Keywords { .. } => continue,
+                Element::Keywords { .. } | Element::Counter => continue,
                 _ => {}
             }
-            prev_par = matches!(block, Block::Par(_));
+            prev_par = matches!(e, Element::Par(_));
         }
-        // Скільки абзаців основного тексту з кожними налаштуваннями
+        // Скільки абзаців основного тексту з кожним оформленням
         let total = body.len();
         let mut counts: std::collections::HashMap<usize, usize> = Default::default();
         for &i in &body {
@@ -2392,14 +2498,12 @@ impl Checker<'_> {
         let mut pending: Vec<Pending> = Vec::new();
         let mut report = |(count, total): (usize, usize),
                           code: &'static str,
-                          origin: Option<&Origin>,
-                          place: (&str, &[&str]),
+                          at: &At,
                           msg: String,
                           fix: Option<(&str, &str)>| {
-            if origin.is_none() && !configured {
+            let Some((loc, suffix, value)) = looks::place(source, work.scope, at) else {
                 return;
-            }
-            let loc = origin.map_or_else(|| doc.setting(place.0, place.1), |o| o.loc.clone());
+            };
             if let Some(p) = pending
                 .iter_mut()
                 .find(|p| p.0 == code && p.1 == loc && p.2.starts_with(msg.as_str()))
@@ -2407,14 +2511,8 @@ impl Checker<'_> {
                 p.4 += count;
                 return;
             }
-            let msg = match origin {
-                None => format!("{msg} (типове значення typst)"),
-                Some(Origin {
-                    template: Some(t), ..
-                }) => format!("{msg} (так задає шаблон, {t})"),
-                Some(_) => msg,
-            };
-            let fixes = match (origin.and_then(|o| o.value.clone()), fix) {
+            let msg = format!("{msg}{}", suffix.unwrap_or_default());
+            let fixes = match (value, fix) {
                 (Some(loc), Some((title, text))) => vec![FixDraft {
                     title: title.into(),
                     edits: vec![(loc, text.into())],
@@ -2425,45 +2523,46 @@ impl Checker<'_> {
         };
 
         for &i in &body {
-            let style = &doc.styles[i];
+            let style = &work.looks[i].text;
             let n = (counts[&i], total);
-            if let Some(size) = style.size_pt()
+            if let Fact::Known(size, why) = &style.size
                 && (size - 14.0).abs() > 0.05
             {
                 report(
                     n,
                     "font-size",
-                    style.size.origin(),
-                    ("text", &["size"]),
+                    &why.at,
                     format!(
                         "основний текст набрано кеглем {}, має бути 14",
-                        fmt_num(size)
+                        fmt_num(*size)
                     ),
                     Some(("Замінити на 14pt", "14pt")),
                 );
             }
-            if let Some(font) = style.font.known()
+            if let Fact::Known(font, why) = &style.font
                 && !font.eq_ignore_ascii_case("times new roman")
             {
                 report(
                     n,
                     "font-family",
-                    style.font.origin(),
-                    ("text", &["font"]),
+                    &why.at,
                     format!("основний текст набрано шрифтом «{font}», має бути Times New Roman"),
                     Some(("Замінити на Times New Roman", "\"Times New Roman\"")),
                 );
             }
+            if let Some((msg, at)) = looks::body_style_issue(style) {
+                report(n, "font-style", at, msg, None);
+            }
             // Інтервал: висота великої літери в шрифтах 0,6–0,75 em, тож
             // зауваження лише там, де інтервал поза межами за будь-якої з них
-            if let Some(em) = style.leading_em()
-                && (spacing(em, 0.75) < 1.35 || spacing(em, 0.6) > 2.2)
+            if let Fact::Known(em, why) = &style.leading
+                && (spacing(*em, 0.75) < 1.35 || spacing(*em, 0.6) > 2.2)
             {
+                let em = *em;
                 report(
                     n,
                     "line-spacing",
-                    style.leading.origin(),
-                    ("par", &["leading"]),
+                    &why.at,
                     format!(
                         "основний текст набрано приблизно через {} інтервалу (leading {} em), має бути 1,5–2",
                         fmt_num(spacing(em, 0.662)),
@@ -2475,9 +2574,10 @@ impl Checker<'_> {
         }
 
         for &i in &indented {
-            let style = &doc.styles[i];
+            let look = &work.looks[i];
             let n = (indent_counts[&i], indented_total);
-            if let Some(d) = style.indent_pt() {
+            if let Fact::Known(d, why) = &look.indent {
+                let d = *d;
                 let msg = if d.abs() < 0.01 {
                     Some(
                         "в абзацах немає абзацного відступу, має бути п'ять знаків (≈ 12,5 мм)"
@@ -2492,27 +2592,22 @@ impl Checker<'_> {
                     None
                 };
                 if let Some(msg) = msg {
-                    report(
-                        n,
-                        "par-indent",
-                        style.indent.origin(),
-                        ("par", &["first-line-indent"]),
-                        msg,
-                        None,
-                    );
+                    report(n, "par-indent", &why.at, msg, None);
                 }
             }
         }
         // За `all: false` typst не відступає перший абзац після заголовка,
         // рисунка, переліку
         for &i in &after_block {
-            let style = &doc.styles[i];
-            if style.indent_pt().is_some_and(|d| d > 0.01) && !style.indent_all {
+            let look = &work.looks[i];
+            if let Fact::Known(d, why) = &look.indent
+                && *d > 0.01
+                && !look.indent_all
+            {
                 report(
                     (0, 0),
                     "par-indent",
-                    style.indent.origin(),
-                    ("par", &["first-line-indent"]),
+                    &why.at,
                     "перший абзац після заголовка, рисунка чи переліку без відступу: задайте `first-line-indent: (amount: …, all: true)`".into(),
                     None,
                 );
@@ -2520,9 +2615,9 @@ impl Checker<'_> {
         }
 
         for &i in &all {
-            let style = &doc.styles[i];
+            let look = &work.looks[i];
             let n = (0, 0);
-            if let Some(page) = style.page.known() {
+            if let Fact::Known(page, why) = &look.paper {
                 let near = |a: f64, b: f64| (a - b).abs() < 1.5;
                 let msg = match (page.w, page.h) {
                     (Some(w), Some(h)) => {
@@ -2543,25 +2638,24 @@ impl Checker<'_> {
                         .map(|n| format!("формат «{n}», має бути А4 (210 мм × 297 мм)")),
                 };
                 if let Some(msg) = msg {
-                    report(
-                        n,
-                        "page-size",
-                        style.page.origin(),
-                        ("page", &["paper", "width", "height", "flipped"]),
-                        msg,
-                        None,
-                    );
+                    report(n, "page-size", &why.at, msg, None);
                 }
             }
-            if let Some(m) = style.margins_pt() {
-                let [(t, _), (r, _), (b, _), (l, _)] = m;
+            if let [
+                Fact::Known(t, wt),
+                Fact::Known(r, wr),
+                Fact::Known(b, wb),
+                Fact::Known(l, wl),
+            ] = &look.margins
+            {
+                let (t, r, b, l) = (*t, *r, *b, *l);
+                let m = [(t, wt), (r, wr), (b, wb), (l, wl)];
                 let min = [20.0, 10.0, 20.0, 25.0];
                 if let Some(bad) = (0..4).find(|&k| m[k].0 < min[k] * MM - 0.5) {
                     report(
                         n,
                         "page-margins",
-                        m[bad].1,
-                        ("page", &["margin"]),
+                        &m[bad].1.at,
                         format!(
                             "береги верхній {}, нижній {}, лівий {}, правий {}; рекомендовано не менше 20, 20, 25 і 10 мм",
                             mm(t),

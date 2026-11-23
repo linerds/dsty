@@ -1,37 +1,15 @@
 //! Налаштування тексту й сторінки, що діють у точці документа: кегль,
 //! шрифт, інтервал, абзацний відступ, формат і береги. Їх збирає модель із
 //! `set`-правил документа й шаблонів ([`crate::eval`]), а статичні правила
-//! перевіряють без компіляції.
+//! перевіряють без компіляції. Кожне налаштування — [`Fact`]: задане
+//! правилом коду, типове typst чи невідоме.
 
-use crate::eval::{Length, MM, SetArg, SetEffect, Value};
+use std::rc::Rc;
+
+use crate::defaults;
+use crate::eval::{Effect, Length, MM, SetArg, SetEffect, Value};
 use crate::text::Loc;
-
-/// Значення налаштування.
-#[derive(Debug, Clone)]
-pub enum Field<T> {
-    /// Типове значення typst: ні документ, ні шаблон його не задають.
-    Default(T),
-    Set(T, Origin),
-    /// Задано так, що з коду не видно (вираз, `context`, невідомий шаблон).
-    Unknown,
-}
-
-impl<T> Field<T> {
-    pub fn known(&self) -> Option<&T> {
-        match self {
-            Field::Default(v) | Field::Set(v, _) => Some(v),
-            Field::Unknown => None,
-        }
-    }
-
-    /// Де задано; `None` для типового значення.
-    pub fn origin(&self) -> Option<&Origin> {
-        match self {
-            Field::Set(_, o) => Some(o),
-            _ => None,
-        }
-    }
-}
+use crate::work::{At, Basis, Fact, Look, Paper, TextLook};
 
 /// Звідки налаштування.
 #[derive(Debug, Clone)]
@@ -70,39 +48,85 @@ impl PageSize {
 #[derive(Debug, Clone)]
 pub struct Style {
     /// Кегль, пт.
-    pub size: Field<f64>,
+    pub size: Fact<f64>,
     /// Перший шрифт переліку, як записано в коді.
-    pub font: Field<String>,
-    pub leading: Field<Length>,
+    pub font: Fact<String>,
+    pub leading: Fact<Length>,
     /// Змінено `top-edge` чи `bottom-edge`: крок рядків з `leading` не вивести.
     pub edges: bool,
     /// Абзацний відступ (`first-line-indent`).
-    pub indent: Field<Length>,
+    pub indent: Fact<Length>,
     /// Відступ і в першому абзаці після заголовка, рисунка, переліку
     /// (`first-line-indent: (all: true)`); типово ні.
     pub indent_all: bool,
-    pub page: Field<PageSize>,
+    pub page: Fact<PageSize>,
     /// Береги: верхній, правий, нижній, лівий; `None`: `auto`.
-    pub margins: [Field<Option<Length>>; 4],
+    pub margins: [Fact<Option<Length>>; 4],
+    /// Мова тексту (`lang`): від неї типові підписи («Рисунок»).
+    pub lang: Fact<String>,
+    pub justify: Fact<bool>,
+    /// `hyphenate`; `None`: `auto` (переноси, якщо текст вирівняно за шириною).
+    pub hyphenate: Fact<Option<bool>>,
+    /// Товщина шрифту (400 звичайний, 700 напівжирний).
+    pub weight: Fact<i64>,
+    pub italic: Fact<bool>,
+    /// Чорний колір тексту.
+    pub black: Fact<bool>,
+    /// Текст перетворено на великі літери (`upper`).
+    pub upper: Fact<bool>,
+    /// Нумерація сторінок (`numbering`): шаблон, функція чи `none`.
+    pub page_numbering: Fact<Value>,
+    /// Розміщення номера сторінки (`number-align`), складники через `+`.
+    pub number_align: Fact<String>,
+    /// Власний колонтитул (`header`, `footer`): номер може друкувати він.
+    pub page_header: Fact<bool>,
+    /// Вміст сторінки поза текстом: `header`, `footer`, `background`,
+    /// `foreground` (`None`: типовий).
+    pub page_parts: Rc<Vec<(String, Fact<Value>)>>,
+    /// `set` елементів і show-правила в порядку дії: з них виводиться
+    /// оформлення заголовків, підписів, формул, переліків, виносок.
+    pub chain: Rc<Vec<Effect>>,
 }
 
 impl Default for Style {
     /// Типові значення typst.
     fn default() -> Self {
         Style {
-            size: Field::Default(11.0),
-            font: Field::Default("Libertinus Serif".into()),
-            leading: Field::Default(Length { pt: 0.0, em: 0.65 }),
+            size: Fact::typst(defaults::TEXT_SIZE, At::default("text", &["size"])),
+            font: Fact::typst(defaults::FONT.into(), At::default("text", &["font"])),
+            leading: Fact::typst(
+                Length {
+                    pt: 0.0,
+                    em: defaults::LEADING_EM,
+                },
+                At::default("par", &["leading"]),
+            ),
             edges: false,
-            indent: Field::Default(Length::default()),
+            indent: Fact::typst(
+                Length::default(),
+                At::default("par", &["first-line-indent"]),
+            ),
             indent_all: false,
-            page: Field::Default(PageSize::paper("a4")),
-            margins: [
-                Field::Default(None),
-                Field::Default(None),
-                Field::Default(None),
-                Field::Default(None),
-            ],
+            page: Fact::typst(
+                PageSize::paper(defaults::PAPER),
+                At::default("page", &["paper", "width", "height", "flipped"]),
+            ),
+            margins: std::array::from_fn(|_| Fact::typst(None, At::default("page", &["margin"]))),
+            lang: Fact::typst(defaults::LANG.into(), At::default("text", &["lang"])),
+            justify: Fact::typst(false, At::default("par", &["justify"])),
+            hyphenate: Fact::typst(None, At::default("text", &["hyphenate"])),
+            weight: Fact::typst(defaults::WEIGHT, At::default("text", &[])),
+            italic: Fact::typst(false, At::default("text", &["style"])),
+            black: Fact::typst(true, At::default("text", &["fill"])),
+            upper: Fact::typst(false, At::default("text", &[])),
+            page_numbering: Fact::typst(Value::None, At::default("page", &["numbering"])),
+            number_align: Fact::typst(
+                defaults::PAGE_NUMBER_ALIGN.into(),
+                At::default("page", &["number-align"]),
+            ),
+            page_header: Fact::typst(false, At::default("page", &["header"])),
+            page_parts: Rc::new(Vec::new()),
+            chain: Rc::new(Vec::new()),
         }
     }
 }
@@ -112,20 +136,174 @@ const RIGHT: usize = 1;
 const BOTTOM: usize = 2;
 const LEFT: usize = 3;
 
+/// Властивість тексту: для вибору місця типового значення.
+#[derive(Clone, Copy)]
+pub enum TextProp {
+    Size,
+    Font,
+    Weight,
+    Italic,
+    Black,
+    Upper,
+    Leading,
+    Hyphenate,
+}
+
+/// Основний текст: типові значення стоять на `set text`/`set par`.
+fn body_place(p: TextProp) -> At {
+    match p {
+        TextProp::Size => At::default("text", &["size"]),
+        TextProp::Font => At::default("text", &["font"]),
+        TextProp::Italic => At::default("text", &["style"]),
+        TextProp::Black => At::default("text", &["fill"]),
+        TextProp::Leading => At::default("par", &["leading"]),
+        TextProp::Hyphenate => At::default("text", &["hyphenate"]),
+        TextProp::Weight | TextProp::Upper => At::default("text", &[]),
+    }
+}
+
+fn basis<T>(f: &Fact<T>) -> Basis {
+    match f.origin() {
+        Some(_) => Basis::Code,
+        None => Basis::Default,
+    }
+}
+
+/// Довжина в пунктах за кеглю `size`.
+pub fn pt(l: &Length, size: Option<f64>) -> Option<f64> {
+    match l.em {
+        0.0 => Some(l.pt),
+        _ => size.map(|s| l.resolve(s)),
+    }
+}
+
 impl Style {
+    /// Оформлення тексту; `place` каже, де стоїть зауваження про типове
+    /// значення (у заголовку — show-правило заголовка, в основному тексті —
+    /// `set text`).
+    pub fn text_look(&self, place: &dyn Fn(TextProp) -> At) -> TextLook {
+        let hyphenate = match self.hyphenate.known() {
+            None => Fact::Unknown,
+            Some(Some(_)) => self
+                .hyphenate
+                .derive(self.hyphenate.known().copied().flatten(), || {
+                    place(TextProp::Hyphenate)
+                }),
+            // `auto`: переноси, якщо текст вирівняно за шириною
+            Some(None) => match self.justify.known() {
+                None => Fact::Unknown,
+                Some(j) => Fact::new(
+                    *j,
+                    basis(&self.justify).min(basis(&self.hyphenate)),
+                    match self.justify.origin().or(self.hyphenate.origin()) {
+                        Some(o) => At::Rule(o.clone()),
+                        None => place(TextProp::Hyphenate),
+                    },
+                ),
+            },
+        };
+        TextLook {
+            size: self.size.placed(|| place(TextProp::Size)),
+            font: self.font.placed(|| place(TextProp::Font)),
+            weight: self.weight.placed(|| place(TextProp::Weight)),
+            italic: self.italic.placed(|| place(TextProp::Italic)),
+            black: self.black.placed(|| place(TextProp::Black)),
+            // Регістр задає show-функція (`upper(it)`): її місце знає `place`
+            upper: match self.upper.known() {
+                Some(&u) => Fact::new(u, basis(&self.upper), place(TextProp::Upper)),
+                None => Fact::Unknown,
+            },
+            leading: self
+                .leading
+                .derive(self.leading_em(), || place(TextProp::Leading)),
+            hyphenate,
+        }
+    }
+
+    /// Оформлення абзацу й сторінки.
+    pub fn look(&self) -> Look {
+        let margins = match self.margins_pt() {
+            Some(m) => m.map(|(pt, o)| match o {
+                Some(o) => Fact::set(pt, o.clone()),
+                None => Fact::typst(pt, At::default("page", &["margin"])),
+            }),
+            None => [Fact::Unknown, Fact::Unknown, Fact::Unknown, Fact::Unknown],
+        };
+        Look {
+            text: self.text_look(&body_place),
+            indent: self.indent.derive(self.indent_pt(), || {
+                At::default("par", &["first-line-indent"])
+            }),
+            indent_all: self.indent_all,
+            paper: self.page.derive(
+                self.page.known().map(|p| Paper {
+                    name: p.name.clone(),
+                    w: p.w,
+                    h: p.h,
+                }),
+                || At::default("page", &["paper", "width", "height", "flipped"]),
+            ),
+            margins,
+        }
+    }
+
     /// Невідомий шаблон чи обгортка: діяти могло що завгодно.
     pub fn forget(&mut self) {
-        self.size = Field::Unknown;
-        self.font = Field::Unknown;
-        self.leading = Field::Unknown;
-        self.indent = Field::Unknown;
-        self.page = Field::Unknown;
-        self.margins = [
-            Field::Unknown,
-            Field::Unknown,
-            Field::Unknown,
-            Field::Unknown,
-        ];
+        self.size = Fact::Unknown;
+        self.font = Fact::Unknown;
+        self.leading = Fact::Unknown;
+        self.indent = Fact::Unknown;
+        self.page = Fact::Unknown;
+        self.margins = [Fact::Unknown, Fact::Unknown, Fact::Unknown, Fact::Unknown];
+        self.lang = Fact::Unknown;
+        self.justify = Fact::Unknown;
+        self.hyphenate = Fact::Unknown;
+        self.weight = Fact::Unknown;
+        self.italic = Fact::Unknown;
+        self.black = Fact::Unknown;
+        self.upper = Fact::Unknown;
+        self.page_numbering = Fact::Unknown;
+        self.number_align = Fact::Unknown;
+        self.page_header = Fact::Unknown;
+        self.page_parts = Rc::new(
+            ["header", "footer", "background", "foreground"]
+                .iter()
+                .map(|n| ((*n).to_owned(), Fact::Unknown))
+                .collect(),
+        );
+        Rc::make_mut(&mut self.chain).push(Effect::Opaque);
+    }
+
+    /// Застосовує налаштування вмісту.
+    pub fn apply_effect(
+        &mut self,
+        effect: &Effect,
+        origin: &dyn Fn(&SetEffect, &SetArg) -> Origin,
+    ) {
+        match effect {
+            Effect::Opaque => self.forget(),
+            Effect::Set(set) => {
+                if !matches!(set.target.as_str(), "text" | "par" | "page") {
+                    Rc::make_mut(&mut self.chain).push(effect.clone());
+                }
+                self.apply(set, &|a: &SetArg| origin(set, a))
+            }
+            Effect::Show(_) => Rc::make_mut(&mut self.chain).push(effect.clone()),
+            Effect::Written(_) => {}
+            Effect::Case(up) => {
+                self.upper = Fact::set(
+                    *up,
+                    Origin {
+                        loc: Loc {
+                            file: 0,
+                            range: 0..0,
+                        },
+                        value: None,
+                        template: None,
+                    },
+                )
+            }
+        }
     }
 
     /// Застосовує `set`; `origin` каже, де задано аргумент.
@@ -133,20 +311,56 @@ impl Style {
         match set.target.as_str() {
             "text" => {
                 if set.open {
-                    self.size = Field::Unknown;
-                    self.font = Field::Unknown;
+                    self.size = Fact::Unknown;
+                    self.font = Fact::Unknown;
+                    self.lang = Fact::Unknown;
+                    self.hyphenate = Fact::Unknown;
+                    self.weight = Fact::Unknown;
+                    self.italic = Fact::Unknown;
+                    self.black = Fact::Unknown;
+                }
+                if let Some(a) = set.arg("lang") {
+                    self.lang = match &a.value {
+                        Value::Str(l) => Fact::set(l.to_lowercase(), origin(a)),
+                        _ => Fact::Unknown,
+                    };
+                }
+                if let Some(a) = set.arg("hyphenate") {
+                    self.hyphenate = match a.value {
+                        Value::Bool(b) => Fact::set(Some(b), origin(a)),
+                        Value::Auto => Fact::set(None, origin(a)),
+                        _ => Fact::Unknown,
+                    };
+                }
+                if let Some(a) = set.arg("weight") {
+                    self.weight = match weight(&a.value) {
+                        Some(w) => Fact::set(w, origin(a)),
+                        None => Fact::Unknown,
+                    };
+                }
+                if let Some(a) = set.arg("style") {
+                    self.italic = match &a.value {
+                        Value::Str(s) => Fact::set(s != "normal", origin(a)),
+                        _ => Fact::Unknown,
+                    };
+                }
+                if let Some(a) = set.arg("fill") {
+                    self.black = match a.value {
+                        Value::Color(b) => Fact::set(b, origin(a)),
+                        _ => Fact::Unknown,
+                    };
                 }
                 if let Some(a) = set.arg("size") {
                     self.size = match (&a.value, self.size.known()) {
-                        (Value::Length(l), _) if l.em == 0.0 => Field::Set(l.pt, origin(a)),
-                        (Value::Length(l), Some(&cur)) => Field::Set(l.resolve(cur), origin(a)),
-                        _ => Field::Unknown,
+                        (Value::Length(l), _) if l.em == 0.0 => Fact::set(l.pt, origin(a)),
+                        (Value::Length(l), Some(&cur)) => Fact::set(l.resolve(cur), origin(a)),
+                        _ => Fact::Unknown,
                     };
                 }
                 if let Some(a) = set.arg("font") {
                     self.font = match font_name(&a.value) {
-                        Some(name) => Field::Set(name, origin(a)),
-                        None => Field::Unknown,
+                        Some(name) => Fact::set(name, origin(a)),
+                        None => Fact::Unknown,
                     };
                 }
                 if set.arg("top-edge").is_some() || set.arg("bottom-edge").is_some() {
@@ -155,13 +369,20 @@ impl Style {
             }
             "par" => {
                 if set.open {
-                    self.leading = Field::Unknown;
-                    self.indent = Field::Unknown;
+                    self.leading = Fact::Unknown;
+                    self.indent = Fact::Unknown;
+                    self.justify = Fact::Unknown;
+                }
+                if let Some(a) = set.arg("justify") {
+                    self.justify = match a.value {
+                        Value::Bool(b) => Fact::set(b, origin(a)),
+                        _ => Fact::Unknown,
+                    };
                 }
                 if let Some(a) = set.arg("leading") {
                     self.leading = match a.value {
-                        Value::Length(l) => Field::Set(l, origin(a)),
-                        _ => Field::Unknown,
+                        Value::Length(l) => Fact::set(l, origin(a)),
+                        _ => Fact::Unknown,
                     };
                 }
                 if let Some(a) = set.arg("first-line-indent") {
@@ -180,8 +401,8 @@ impl Style {
                     }
                     let amount = amount.map(|(l, _)| l);
                     self.indent = match amount {
-                        Some(l) => Field::Set(l, origin(a)),
-                        None => Field::Unknown,
+                        Some(l) => Fact::set(l, origin(a)),
+                        None => Fact::Unknown,
                     };
                 }
             }
@@ -191,19 +412,52 @@ impl Style {
     }
 
     fn apply_page(&mut self, set: &SetEffect, origin: &dyn Fn(&SetArg) -> Origin) {
+        if let Some(a) = set.arg("numbering") {
+            self.page_numbering = match &a.value {
+                v @ (Value::None | Value::Str(_) | Value::Func(_)) => {
+                    Fact::set(v.clone(), origin(a))
+                }
+                _ => Fact::Unknown,
+            };
+        }
+        if let Some(a) = set.arg("number-align") {
+            self.number_align = match &a.value {
+                Value::Align(v) => Fact::set(v.clone(), origin(a)),
+                _ => Fact::Unknown,
+            };
+        }
+        for name in ["header", "footer"] {
+            if let Some(a) = set.arg(name) {
+                self.page_header = match a.value {
+                    Value::None | Value::Auto => Fact::set(false, origin(a)),
+                    _ => Fact::set(true, origin(a)),
+                };
+            }
+        }
+        for name in ["header", "footer", "background", "foreground"] {
+            if let Some(a) = set.arg(name) {
+                let parts = Rc::make_mut(&mut self.page_parts);
+                parts.retain(|(n, _)| n != name);
+                parts.push((name.to_owned(), Fact::set(a.value.clone(), origin(a))));
+            }
+        }
         if set.open {
-            self.page = Field::Unknown;
-            self.margins = [
-                Field::Unknown,
-                Field::Unknown,
-                Field::Unknown,
-                Field::Unknown,
-            ];
+            self.page_numbering = Fact::Unknown;
+            self.number_align = Fact::Unknown;
+            self.page_header = Fact::Unknown;
+            self.page_parts = Rc::new(
+                ["header", "footer", "background", "foreground"]
+                    .iter()
+                    .map(|n| ((*n).to_owned(), Fact::Unknown))
+                    .collect(),
+            );
+            self.page = Fact::Unknown;
+            self.margins = [Fact::Unknown, Fact::Unknown, Fact::Unknown, Fact::Unknown];
         }
         if let Some(a) = set.arg("paper") {
             self.page = match &a.value {
-                Value::Str(name) => Field::Set(PageSize::paper(name), origin(a)),
-                _ => Field::Unknown,
+                Value::Str(name) => Fact::set(PageSize::paper(name), origin(a)),
+                _ => Fact::Unknown,
             };
         }
         for (name, height) in [("width", false), ("height", true)] {
@@ -222,9 +476,9 @@ impl Style {
                     } else {
                         page.w = v;
                     }
-                    Field::Set(page, origin(a))
+                    Fact::set(page, origin(a))
                 }
-                _ => Field::Unknown,
+                _ => Fact::Unknown,
             };
         }
         if let Some(a) = set.arg("margin") {
@@ -235,8 +489,8 @@ impl Style {
             };
             let put = |this: &mut Self, i: usize, v: &Value| {
                 this.margins[i] = match side(v) {
-                    Some(v) => Field::Set(v, origin(a)),
-                    None => Field::Unknown,
+                    Some(v) => Fact::set(v, origin(a)),
+                    None => Fact::Unknown,
                 };
             };
             match &a.value {
@@ -277,12 +531,7 @@ impl Style {
                                 | "outside"
                         )
                     }) {
-                        self.margins = [
-                            Field::Unknown,
-                            Field::Unknown,
-                            Field::Unknown,
-                            Field::Unknown,
-                        ];
+                        self.margins = [Fact::Unknown, Fact::Unknown, Fact::Unknown, Fact::Unknown];
                     }
                 }
                 v => {
@@ -342,6 +591,26 @@ impl Style {
             );
         }
         Some(out)
+    }
+}
+
+/// Товщина шрифту: `"bold"`, `700`.
+pub fn weight(v: &Value) -> Option<i64> {
+    match v {
+        Value::Int(i) => Some(*i),
+        Value::Str(s) => Some(match s.as_str() {
+            "thin" => 100,
+            "extralight" => 200,
+            "light" => 300,
+            "regular" => 400,
+            "medium" => 500,
+            "semibold" => 600,
+            "bold" => 700,
+            "extrabold" => 800,
+            "black" => 900,
+            _ => return None,
+        }),
+        _ => None,
     }
 }
 

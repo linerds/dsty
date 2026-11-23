@@ -136,6 +136,7 @@ fn print_rules(format: RulesFormat) {
                         "code": r.code,
                         "clause": r.clause,
                         "description": r.desc,
+                        "kind": r.kind(),
                         "full": r.full,
                         "optional": r.optional,
                         "severity": r.severity.name(),

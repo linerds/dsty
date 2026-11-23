@@ -159,27 +159,6 @@
 }
 // @end
 
-// @runs
-// Відхилення в окремих словах основного тексту (колір, шрифт, кегль
-// посеред абзацу): проба на кожному прогоні, тож лише для `font-style`.
-#show text: it => {
-  context {
-    let k = dsty-kind()
-    if k not in ("", "l", "b") { return }
-    let rec = dsty-style(k)
-    if calc.abs(rec.size - 14) < 0.05 and rec.font == "times new roman" and rec.style == "normal" and rec.black { return }
-    [#metadata((k: "run", kind: k, t: it.text) + rec)<dsty-probe>]
-  }
-  it
-}
-
-// Підпис: ширина для перевірки розміщення посередині
-#show figure.caption: it => {
-  context [#metadata((k: "caption", w: measure(it).width.pt()))<dsty-probe>]
-  it
-}
-// @end
-
 // @par
 // Абзац: кегль, відступ, інтервал (крок рядків вимірюється на службовому
 // тексті; `measure` з тими самими стилями typst кешує).
@@ -228,14 +207,6 @@
   [#metadata((k: "table", header: header != none, repeat: header != none and header.at("repeat", default: true)))<dsty-probe>]
   it
   [#metadata((k: "table-end"))<dsty-probe>]
-}
-// @end
-
-// @equation
-// Виокремлена формула: вирівнювання задається стилем
-#show math.equation.where(block: true): it => {
-  context [#metadata((k: "eq-style", align: repr(align.alignment)))<dsty-probe>]
-  it
 }
 // @end
 
