@@ -106,7 +106,7 @@ struct Grouped {
     fixes: Vec<FixDraft>,
 }
 
-struct Collect<'a> {
+pub(super) struct Collect<'a> {
     code: &'a Code,
     /// Типові значення typst стосуються документа.
     scope: Scope,
@@ -180,6 +180,40 @@ impl Collect<'_> {
         (total, noun): (usize, &'static str),
         fix: Option<(&str, &str)>,
     ) {
+        self.insert(key, code, at, msg, clause, (1, total, noun), fix);
+    }
+
+    /// Зауваження до налаштування, що діє на `count` абзаців основного тексту з `total`.
+    pub(super) fn add_paragraphs(
+        &mut self,
+        code: &'static str,
+        at: &At,
+        msg: String,
+        (count, total): (usize, usize),
+        fix: Option<(&str, &str)>,
+    ) {
+        self.insert(
+            msg.clone(),
+            code,
+            at,
+            msg,
+            None,
+            (count, total, "абзаців"),
+            fix,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert(
+        &mut self,
+        key: String,
+        code: &'static str,
+        at: &At,
+        msg: String,
+        clause: Option<&'static str>,
+        (count, total, noun): (usize, usize, &'static str),
+        fix: Option<(&str, &str)>,
+    ) {
         let Some((loc, suffix, value)) = place(self.code, self.scope, at) else {
             return;
         };
@@ -189,7 +223,7 @@ impl Collect<'_> {
             .iter_mut()
             .find(|p| p.code == code && p.loc == loc && p.key == key)
         {
-            p.count += 1;
+            p.count += count;
             return;
         }
         let fixes = match (value, fix) {
@@ -205,7 +239,7 @@ impl Collect<'_> {
             loc,
             msg,
             clause,
-            count: 1,
+            count,
             total,
             noun,
             fixes,
@@ -222,14 +256,20 @@ fn is_times(font: &str) -> bool {
     font.eq_ignore_ascii_case("times new roman")
 }
 
+impl<'a> Collect<'a> {
+    pub(super) fn new(code: &'a Code, scope: Scope) -> Self {
+        Collect {
+            code,
+            scope,
+            list: Vec::new(),
+        }
+    }
+}
+
 impl Checker<'_> {
     /// Оформлення елементів з коду.
     pub(super) fn looks(&mut self) {
-        let mut c = Collect {
-            code: self.code,
-            scope: self.work.scope,
-            list: Vec::new(),
-        };
+        let mut c = Collect::new(self.code, self.work.scope);
         self.headings_look(&mut c);
         self.figures_look(&mut c);
         self.equations_look(&mut c);
@@ -239,6 +279,11 @@ impl Checker<'_> {
         self.pages_look(&mut c);
         self.contents_look(&mut c);
         self.inlines();
+        self.add_collected(c);
+    }
+
+    /// Зауваження з [`Collect`]: одне на причину, з кількістю елементів.
+    pub(super) fn add_collected(&mut self, c: Collect) {
         for p in c.list {
             let msg = if p.total > 1 && p.count < p.total {
                 format!("{} ({} {} з {})", p.msg, p.count, p.noun, p.total)

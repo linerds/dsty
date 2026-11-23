@@ -27,6 +27,9 @@ use crate::lint::{Options, Severity};
 /// Імена файлу налаштувань у порядку пошуку.
 pub const FILE_NAMES: &[&str] = &[".dsty.toml", "dsty.toml"];
 
+/// Main-файл документа відносно його теки, у порядку пошуку.
+pub const MAIN_FILES: &[&str] = &["src/main.typ", "main.typ"];
+
 /// Рівень правила в налаштуваннях: як [`Severity`] або `off` (вимкнути).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]

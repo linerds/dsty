@@ -2436,10 +2436,6 @@ fn spacing(leading: f64, cap: f64) -> f64 {
     (leading + cap) / 1.15
 }
 
-/// Зауваження до налаштування, поки абзаци рахуються: (правило, місце,
-/// повідомлення, виправлення, абзаців із цим налаштуванням, з-поміж скількох).
-type Pending = (&'static str, Loc, String, Vec<FixDraft>, usize, usize);
-
 /// Налаштування тексту й сторінки з коду (статична частина правил кегля,
 /// шрифту, інтервалу, відступу й формату; решту бачить повна перевірка).
 impl Checker<'_> {
@@ -2493,33 +2489,13 @@ impl Checker<'_> {
             list.sort_unstable();
             list.dedup();
         }
-        // Зауваження за місцем налаштування: (правило, місце, повідомлення,
-        // виправлення, абзаців, з-поміж скількох)
-        let mut pending: Vec<Pending> = Vec::new();
-        let mut report = |(count, total): (usize, usize),
+        let mut collect = looks::Collect::new(source, work.scope);
+        let mut report = |n: (usize, usize),
                           code: &'static str,
                           at: &At,
                           msg: String,
                           fix: Option<(&str, &str)>| {
-            let Some((loc, suffix, value)) = looks::place(source, work.scope, at) else {
-                return;
-            };
-            if let Some(p) = pending
-                .iter_mut()
-                .find(|p| p.0 == code && p.1 == loc && p.2.starts_with(msg.as_str()))
-            {
-                p.4 += count;
-                return;
-            }
-            let msg = format!("{msg}{}", suffix.unwrap_or_default());
-            let fixes = match (value, fix) {
-                (Some(loc), Some((title, text))) => vec![FixDraft {
-                    title: title.into(),
-                    edits: vec![(loc, text.into())],
-                }],
-                _ => Vec::new(),
-            };
-            pending.push((code, loc, msg, fixes, count, total));
+            collect.add_paragraphs(code, at, msg, n, fix);
         };
 
         for &i in &body {
@@ -2668,14 +2644,6 @@ impl Checker<'_> {
                 }
             }
         }
-        for (code, loc, msg, fixes, count, total) in pending {
-            // Налаштування діє не на весь основний текст (місцеве `set`)
-            let msg = if count > 0 && count < total {
-                format!("{msg} ({count} абзаців з {total})")
-            } else {
-                msg
-            };
-            self.add(code, Some(loc), msg, fixes);
-        }
+        self.add_collected(collect);
     }
 }

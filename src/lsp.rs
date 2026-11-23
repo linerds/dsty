@@ -45,7 +45,7 @@ use lsp_types::{
     WorkDoneProgressBegin, WorkDoneProgressCreateParams, WorkDoneProgressEnd, WorkspaceEdit,
 };
 
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::full::{self, Facts};
 use crate::lint::{self, Options, Severity};
 use crate::{model, rules};
@@ -1304,14 +1304,15 @@ fn orphan_root(path: &Path, root: &Path) -> PathBuf {
 fn guess_main(path: &Path, base: &Path) -> Option<PathBuf> {
     let inside = path.starts_with(base);
     for dir in path.ancestors().skip(1) {
-        for candidate in ["src/main.typ", "main.typ"] {
+        for candidate in config::MAIN_FILES {
             let main = dir.join(candidate);
             if main.is_file() {
                 return Some(canonical(&main));
             }
         }
-        let project = ["typst.toml", ".git", ".dsty.toml", "dsty.toml"]
+        let project = ["typst.toml", ".git"]
             .iter()
+            .chain(config::FILE_NAMES)
             .any(|m| dir.join(m).exists());
         if project || (inside && dir == base) {
             break;

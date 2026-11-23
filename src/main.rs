@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use anyhow::Context as _;
 use clap::{Parser, Subcommand, ValueEnum};
 
-use dsty::config::Config;
+use dsty::config::{self, Config};
 use dsty::full;
 use dsty::lint::{self, Diagnostic, Severity};
 use dsty::lsp;
@@ -177,7 +177,7 @@ fn explain(code: &str) -> anyhow::Result<ExitCode> {
 /// Main-файл за шляхом: сам файл або `src/main.typ` чи `main.typ` теки.
 fn main_file(path: &Path) -> anyhow::Result<PathBuf> {
     if path.is_dir() {
-        for candidate in ["src/main.typ", "main.typ"] {
+        for candidate in config::MAIN_FILES {
             let file = path.join(candidate);
             if file.is_file() {
                 return canonical(&file, "main-файл");
