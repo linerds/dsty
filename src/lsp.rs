@@ -727,14 +727,7 @@ impl Server {
         // Назва правила в коментарі `dstu-ignore`
         let text = self.text(&path);
         if let Some(line) = text.lines().nth(position.line as usize) {
-            let col = utf16_to_byte(line, position.character as usize);
-            let is_word = |c: char| c.is_ascii_alphanumeric() || c == '-';
-            let start = line[..col]
-                .rfind(|c: char| !is_word(c))
-                .map_or(0, |i| i + 1);
-            let end = line[col..]
-                .find(|c: char| !is_word(c))
-                .map_or(line.len(), |i| col + i);
+            let (start, end) = rule_word(line, utf16_to_byte(line, position.character as usize));
             if line[..start].contains("dstu-ignore")
                 && let Some(rule) = rules::find(&line[start..end])
                 && seen.insert(rule.code)
@@ -1348,6 +1341,15 @@ fn overlaps(a: Range, b: Range) -> bool {
     key(a.start) <= key(b.end) && key(b.start) <= key(a.end)
 }
 
+/// Межі назви правила (`[a-z0-9-]`) навколо байта `col`. Межі завжди
+/// припадають на межі символів, навіть коли поруч кирилиця.
+fn rule_word(line: &str, col: usize) -> (usize, usize) {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '-';
+    let start = line[..col].trim_end_matches(is_word).len();
+    let end = line.len() - line[col..].trim_start_matches(is_word).len();
+    (start, end)
+}
+
 /// Байт у рядку за колонкою UTF-16.
 fn utf16_to_byte(line: &str, utf16: usize) -> usize {
     let mut units = 0;
@@ -1473,6 +1475,22 @@ mod tests {
         // Не вище робочої теки
         assert_eq!(guess_main(&chapter, &work.join("src/chapters")), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rule_word_on_cyrillic() {
+        // Курсор одразу після кириличної літери: межа не всередині `я`
+        let line = "Звітя";
+        let col = utf16_to_byte(line, 5);
+        assert_eq!(rule_word(line, col), (line.len(), line.len()));
+        let line = "// dstu-ignore: я,heading-case тут";
+        let col = utf16_to_byte(line, 20);
+        let (start, end) = rule_word(line, col);
+        assert_eq!(&line[start..end], "heading-case");
+        for c in 0..=line.encode_utf16().count() {
+            let (start, end) = rule_word(line, utf16_to_byte(line, c));
+            let _ = &line[start..end];
+        }
     }
 
     #[test]
