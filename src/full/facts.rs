@@ -20,9 +20,6 @@ pub enum Item {
         level: usize,
         num: Option<String>,
         body: String,
-        label: Option<String>,
-        #[serde(default)]
-        counter: Vec<i64>,
     },
     Figure {
         kind: String,
@@ -30,16 +27,12 @@ pub enum Item {
         label: Option<String>,
         floating: bool,
         caption: Option<String>,
-        supplement: String,
     },
     Equation {
         num: Option<String>,
         label: Option<String>,
     },
     Footnote {
-        num: Option<String>,
-        #[serde(default)]
-        counter: Vec<i64>,
         again: bool,
     },
     Ref {
@@ -48,34 +41,17 @@ pub enum Item {
     Cite {
         key: String,
     },
-    List {
-        marker: String,
-        indent: f64,
-        #[serde(rename = "indent-em")]
-        indent_em: f64,
-    },
-    Enum {
-        num: Option<String>,
-        indent: f64,
-        #[serde(rename = "indent-em")]
-        indent_em: f64,
-    },
+    List,
+    Enum,
     /// Прогін тексту (лише вартий перевірки).
     Run(Run),
-    /// Абзац: стилі на його початку.
+    /// Абзац: вид і початок тексту.
     Par(Par),
-    /// Ширина підпису фігури.
-    Caption {
-        w: f64,
-    },
     Table {
         header: bool,
         repeat: bool,
     },
     TableEnd,
-    EqStyle {
-        align: String,
-    },
     Page(Page),
     #[serde(other)]
     Other,
@@ -84,67 +60,21 @@ pub enum Item {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Run {
     /// Вид вмісту за кодом: основний текст (`""`), заголовок (`h`/`H`), підпис
-    /// (`c`), фігура (`f`), таблиця (`t`), зміст (`o`), формула (`e`), перелік
-    /// (`l`), слово «де» в основному тексті (`w`, для відступу пояснень під
-    /// формулою). Заголовки, зміст, підписи й формули записуються по прогонах,
-    /// для решти записуються лише збіги: ключові слова, позначки переліків, курсив.
+    /// (`c`), фігура (`f`), таблиця (`t`), формула (`e`), надруковане
+    /// посилання на джерело (`z`). Заголовки й посилання записуються по
+    /// прогонах, з підписів лише слово «Рисунок» і номер, з формул лише номер,
+    /// для решти лише збіги ключових слів.
     pub kind: String,
     pub t: String,
-    pub size: f64,
-    pub font: String,
-    pub style: String,
-    pub black: bool,
-    #[serde(default)]
-    pub weight: Option<serde_json::Value>,
-    #[serde(default)]
-    pub hyph: Option<bool>,
+    /// Ширина прогону, pt (лише номер формули).
     #[serde(default)]
     pub w: Option<f64>,
-    #[serde(default)]
-    pub upper: Option<bool>,
-}
-
-impl Run {
-    /// Накреслення числом: «semibold» -> 600.
-    pub fn weight(&self) -> Option<u32> {
-        match self.weight.as_ref()? {
-            serde_json::Value::Number(n) => n.as_u64().map(|n| n as u32),
-            serde_json::Value::String(s) => Some(match s.as_str() {
-                "thin" => 100,
-                "extralight" => 200,
-                "light" => 300,
-                "regular" => 400,
-                "medium" => 500,
-                "semibold" => 600,
-                "bold" => 700,
-                "extrabold" => 800,
-                "black" => 900,
-                _ => return None,
-            }),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Par {
     pub kind: String,
-    pub size: f64,
-    /// Шрифт, накреслення й колір на початку абзацу (для позначених видів
-    /// колір завжди `black`).
-    #[serde(default)]
-    pub font: String,
-    #[serde(default)]
-    pub style: String,
-    #[serde(default)]
-    pub black: bool,
-    pub indent: f64,
-    pub all: bool,
-    /// Абзац починається з розриву рядка (`\`): перший рядок порожній.
-    #[serde(default, rename = "lead-break")]
-    pub lead_break: bool,
-    /// Крок рядків (від основи до основи), pt.
-    pub pitch: f64,
+    /// Початок тексту: за ним абзац прив'язується до коду.
     pub head: String,
 }
 
@@ -156,14 +86,6 @@ pub struct Page {
     pub bottom: Option<f64>,
     pub left: Option<f64>,
     pub right: Option<f64>,
-    /// Номер, як його надруковано (`None`, якщо номера немає).
-    pub num: Option<String>,
-    pub numbered: bool,
-    pub align: String,
-    /// Колонтитул типовий (`auto`): номер друкує сам typst.
-    pub header: bool,
-    /// Довжина лінії над виносками: (pt, частка ширини тексту).
-    pub sep: Option<(f64, f64)>,
 }
 
 impl Page {

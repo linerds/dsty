@@ -585,7 +585,7 @@ impl<'a> Checker<'a> {
                 _ => None,
             })
             .collect();
-        let stream = self.indices(|i| matches!(i, Item::List { .. } | Item::Enum { .. }));
+        let stream = self.indices(|i| matches!(i, Item::List | Item::Enum));
         if stream.len() == model.len() {
             for (k, &i) in stream.iter().enumerate() {
                 self.locs[i] = model[k].1.items.first().map(|it| it.loc.clone());
@@ -676,13 +676,13 @@ impl<'a> Checker<'a> {
     fn is_content(item: &Item) -> bool {
         match item {
             Item::Par(p) => p.kind != "n",
-            Item::Run(r) => !matches!(r.kind.as_str(), "n" | "s" | "m" | "w"),
+            Item::Run(r) => !matches!(r.kind.as_str(), "n" | "s"),
             Item::Heading { .. }
             | Item::Figure { .. }
             | Item::Equation { .. }
             | Item::Table { .. }
-            | Item::List { .. }
-            | Item::Enum { .. } => true,
+            | Item::List
+            | Item::Enum => true,
             _ => false,
         }
     }
@@ -903,9 +903,7 @@ impl<'a> Checker<'a> {
             let runs: Vec<(usize, &Run)> = (i + 1..next)
                 .map_while(|j| match &self.e[j].item {
                     Item::Run(r) if r.kind == "e" => Some(Some((j, r))),
-                    Item::Run(_) | Item::Ref { .. } | Item::Cite { .. } | Item::EqStyle { .. } => {
-                        Some(None)
-                    }
+                    Item::Run(_) | Item::Ref { .. } | Item::Cite { .. } => Some(None),
                     _ => None,
                 })
                 .flatten()
