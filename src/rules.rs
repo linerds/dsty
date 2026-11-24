@@ -16,7 +16,7 @@ pub mod looks;
 use crate::eval::MM;
 use crate::model::Code;
 use crate::text::{Case, Loc, Text, ends_with_period, first_case, fmt_num, mm, quote, tail};
-use crate::work::{At, Element, Fact, FigureKind, Heading, Label, Par, Work};
+use crate::work::{At, Element, Fact, FigureKind, Heading, Label, Par, Role, Work};
 
 /// Рівень зауваження в редакторі.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
@@ -595,11 +595,36 @@ pub struct Msg {
     pub text: String,
     /// Як виправити, якщо цього не каже назва виправлення.
     pub help: Option<String>,
+    /// Припущення, на яке спирається зауваження.
+    pub assumed: Option<&'static str>,
+}
+
+impl Msg {
+    /// Зауваження спирається на `fact`: якщо той лише припущення
+    /// ([`crate::work::Basis::Inferred`]), воно позначається словами `what`.
+    pub(crate) fn assuming<T>(mut self, fact: &Fact<T>, what: &'static str) -> Self {
+        if fact.assumed() {
+            self.assumed.get_or_insert(what);
+        }
+        self
+    }
+}
+
+impl Msg {
+    /// Зауваження спирається на здогадку самого правила (`what`).
+    pub(crate) fn guessed(mut self, what: &'static str) -> Self {
+        self.assumed.get_or_insert(what);
+        self
+    }
 }
 
 impl From<String> for Msg {
     fn from(text: String) -> Self {
-        Msg { text, help: None }
+        Msg {
+            text,
+            help: None,
+            assumed: None,
+        }
     }
 }
 
@@ -614,8 +639,22 @@ pub(crate) fn with_help(text: impl Into<String>, help: impl Into<String>) -> Msg
     Msg {
         text: text.into(),
         help: Some(help.into()),
+        assumed: None,
     }
 }
+
+/// Припущення, на які спираються зауваження ([`crate::work::Basis::Inferred`]).
+pub(crate) const TITLE_PAGE: &str = "титульним аркушем вважається все до першого заголовка";
+const KEYWORDS_ARG: &str = "аргумент `keywords:` вважається ключовими словами реферату";
+const KEYWORDS_LINE: &str =
+    "рядок великими літерами через кому в рефераті вважається ключовими словами";
+const TERMS: &str = "перша колонка таблиці чи текст до тире вважається скороченням";
+const CITED: &str = "«[N]» у тексті вважається посиланням на джерело";
+const LIST_REFS: &str = "посилання на позиції шукаються за зразками «див. 2)», «у пункті б)»";
+pub(crate) const STRUCTURE_VARIANT: &str =
+    "заголовок з такою назвою вважається структурним елементом";
+pub(crate) const APPENDIX: &str =
+    "заголовок з нумерацією літерою чи підписом «Додаток» вважається додатком";
 
 /// Знайдене порушення до перетворення на позиції.
 pub struct Found {
@@ -624,6 +663,8 @@ pub struct Found {
     pub msg: String,
     /// Як виправити (термінал показує це замість назви виправлення).
     pub help: Option<String>,
+    /// Припущення, на яке спирається зауваження: `--fix` його не виправляє.
+    pub assumed: Option<&'static str>,
     pub fixes: Vec<FixDraft>,
     /// Пункт стандарту саме цього зауваження, якщо правило охоплює кілька.
     pub clause: Option<&'static str>,
@@ -644,6 +685,7 @@ impl Found {
             loc,
             msg,
             help: None,
+            assumed: None,
             fixes,
             clause: None,
             group: None,
@@ -752,6 +794,12 @@ pub(crate) fn structural(title: &str) -> Option<(&'static str, u8)> {
         return Some(STRUCTURAL[3]);
     }
     None
+}
+
+/// Структурний елемент упізнано не за точною назвою зі стандарту, а за
+/// поширеним варіантом («Література», «Перелік скорочень»).
+pub(crate) fn structural_variant(title: &str) -> bool {
+    structural(title).is_some_and(|(name, _)| title_key(title) != name)
 }
 
 /// Канонічна назва для неканонічного заголовка структурного елемента
@@ -990,6 +1038,7 @@ impl Checker<'_> {
         let msg = msg.into();
         let mut found = Found::new(rule, loc, msg.text, fixes);
         found.help = msg.help;
+        found.assumed = msg.assumed;
         found.group = group;
         self.out.push(found);
         self.out.last_mut()
@@ -1020,12 +1069,15 @@ impl Checker<'_> {
     fn headings(&mut self) {
         // Нумеровані заголовки, під якими зараз стоїмо: (заголовок, прямі нащадки)
         let mut open: Vec<(&Heading, Vec<&Heading>)> = Vec::new();
-        let mut latest: Option<(u8, String, Loc)> = None;
+        // (ранг, назва, місце, припущення, на якому стоїть ранг)
+        let mut latest: Option<(u8, String, Loc, Option<&'static str>)> = None;
         let mut appendices: Vec<&Heading> = Vec::new();
         let (work, code) = (self.work, self.code);
 
         let mut present: Vec<&str> = Vec::new();
         let mut chapters = false;
+        // Нумеровані розділи є, але їх вважаємо додатками
+        let mut chapters_guessed = false;
         for block in &work.elements {
             let Element::Heading(h) = block else { continue };
             let title = h.title.trimmed().to_owned();
@@ -1046,7 +1098,9 @@ impl Checker<'_> {
             // є лише нумеровані підрозділи
             match structural(&title) {
                 Some((name, _)) if h.level == 1 => present.push(name),
-                None if h.numbered && !h.appendix => chapters = true,
+                None if h.numbered && !h.appendix.is(&true) => chapters = true,
+                // Нумерований розділ, який вважаємо додатком
+                None if h.numbered && h.appendix.assumed() => chapters_guessed = true,
                 _ => {}
             }
 
@@ -1076,7 +1130,8 @@ impl Checker<'_> {
                     with_help(
                         format!("структурний елемент названо {}", quote(&title)),
                         format!("Перейменувати на «{canonical}»"),
-                    ),
+                    )
+                    .guessed(STRUCTURE_VARIANT),
                     fix.into_iter().collect(),
                 );
             }
@@ -1106,14 +1161,18 @@ impl Checker<'_> {
             }
 
             let structural = structural(&title);
-            let appendix = h.level == 1 && h.appendix;
+            let appendix = h.level == 1 && h.appendix.is(&true);
             if appendix {
                 appendices.push(h);
                 if case_of(&h.title) == Some(Case::Lower) {
                     self.add(
                         "appendix-case",
                         Some(h.loc.clone()),
-                        format!("заголовок додатка з малої літери: {}", quote(&title)),
+                        Msg::from(format!(
+                            "заголовок додатка з малої літери: {}",
+                            quote(&title)
+                        ))
+                        .assuming(&h.appendix, APPENDIX),
                         case_fix(&h.title, Case::Upper).into_iter().collect(),
                     );
                 }
@@ -1138,10 +1197,17 @@ impl Checker<'_> {
                 self.add(
                     "heading-numbered",
                     Some(h.loc.clone()),
-                    with_help(
-                        format!("структурний елемент {} пронумеровано", quote(&title)),
-                        "Прибрати номер: `#heading(numbering: none)[…]`",
-                    ),
+                    {
+                        let msg = with_help(
+                            format!("структурний елемент {} пронумеровано", quote(&title)),
+                            "Прибрати номер: `#heading(numbering: none)[…]`",
+                        );
+                        if structural_variant(&title) {
+                            msg.guessed(STRUCTURE_VARIANT)
+                        } else {
+                            msg
+                        }
+                    },
                     fix.into_iter().collect(),
                 );
             }
@@ -1157,23 +1223,34 @@ impl Checker<'_> {
             } else {
                 None
             };
+            let rank_guess = if appendix && h.appendix.assumed() {
+                Some(APPENDIX)
+            } else if structural.is_some() && structural_variant(&title) {
+                Some(STRUCTURE_VARIANT)
+            } else {
+                None
+            };
             if let Some(rank) = rank {
                 match &latest {
-                    Some((latest_rank, latest_title, latest_loc)) if rank < *latest_rank => {
+                    Some((latest_rank, latest_title, latest_loc, latest_assumed))
+                        if rank < *latest_rank =>
+                    {
                         let name = if rank == 6 {
                             format!("розділ {}", quote(&title))
                         } else {
                             quote(&title)
                         };
-                        let msg = with_help(
+                        let mut msg = with_help(
                             format!("{name} стоїть після {}", quote(latest_title)),
                             format!("Перенести перед {}", quote(latest_title)),
                         );
+                        // Ранг одного з двох лише вгадано
+                        msg.assumed = latest_assumed.or(rank_guess);
                         let before = latest_loc.clone();
                         self.add("structure-order", Some(h.loc.clone()), msg, Vec::new());
                         self.relate("structure-order", before, "має стояти перед цим елементом");
                     }
-                    _ => latest = Some((rank, title.clone(), h.loc.clone())),
+                    _ => latest = Some((rank, title.clone(), h.loc.clone(), rank_guess)),
                 }
             }
 
@@ -1208,7 +1285,11 @@ impl Checker<'_> {
             self.add(
                 "structure-required",
                 Some(anchor),
-                "немає нумерованих розділів суті звіту",
+                if chapters_guessed {
+                    Msg::from("немає нумерованих розділів суті звіту").guessed(APPENDIX)
+                } else {
+                    "немає нумерованих розділів суті звіту".into()
+                },
                 Vec::new(),
             );
         }
@@ -1223,7 +1304,11 @@ impl Checker<'_> {
                 self.add(
                     "appendix-unreferenced",
                     Some(app.loc.clone()),
-                    format!("на додаток {} немає посилання в тексті", quote(title)),
+                    Msg::from(format!(
+                        "на додаток {} немає посилання в тексті",
+                        quote(title)
+                    ))
+                    .assuming(&app.appendix, APPENDIX),
                     Vec::new(),
                 );
                 continue;
@@ -1232,10 +1317,11 @@ impl Checker<'_> {
                 self.add(
                     "appendix-order",
                     Some(app.loc.clone()),
-                    format!(
+                    Msg::from(format!(
                         "на додаток {} вперше посилаються раніше, ніж на попередній",
                         quote(title)
-                    ),
+                    ))
+                    .assuming(&app.appendix, APPENDIX),
                     Vec::new(),
                 );
             }
@@ -1646,7 +1732,8 @@ impl Checker<'_> {
                 with_help(
                     format!("позиції переліку позначено {shown}, але посилань на них немає"),
                     "Позначити позиції «–»",
-                ),
+                )
+                .guessed(LIST_REFS),
                 fix.into_iter().collect(),
             );
         }
@@ -1667,7 +1754,7 @@ impl Checker<'_> {
             let raw = par.text.as_str();
             let start = par.text.trimmed_range().start;
 
-            if par.after_equation
+            if par.role == Role::Where
                 && let Some(m) = WHERE_COLON.find(par.text.trimmed())
             {
                 let colon = start + m.end() - 1;
@@ -1706,10 +1793,11 @@ impl Checker<'_> {
                 self.add(
                     "bibliography-missing",
                     par.text.loc(m.range()),
-                    format!(
+                    Msg::from(format!(
                         "у тексті є посилання «{}», а переліку джерел посилання немає",
                         m.as_str()
-                    ),
+                    ))
+                    .guessed(CITED),
                     Vec::new(),
                 );
             }
@@ -1769,6 +1857,9 @@ impl Checker<'_> {
     /// Примітка (7.8.3, 7.8.4): «Примітка.» або «Примітка 1.», далі текст з
     /// великої літери.
     fn note(&mut self, par: &Par) {
+        if par.role != Role::Note {
+            return;
+        }
         let start = par.text.trimmed_range().start;
         let Some(c) = NOTE.captures(par.text.trimmed()) else {
             return;
@@ -1852,6 +1943,9 @@ impl Checker<'_> {
         let mut prev: Option<usize> = None;
         for (i, block) in work.elements.iter().enumerate() {
             let Element::Par(par) = block else { continue };
+            if par.role != Role::Note {
+                continue;
+            }
             let Some(c) = NOTE.captures(par.text.trimmed()) else {
                 continue;
             };
@@ -1930,7 +2024,11 @@ impl Checker<'_> {
         for block in &work.elements {
             match block {
                 // Шаблон сам розставляє ключові слова за абеткою
-                Element::Keywords { count, loc } => self.keywords_count(*count, loc.clone()),
+                Element::Keywords { count, loc } => {
+                    if let Some(&n) = count.known() {
+                        self.keywords_count(n, loc.clone(), KEYWORDS_ARG);
+                    }
+                }
                 // Набрані вручну: рядок великими літерами через кому в рефераті
                 Element::Par(par) if par.section == Some(ABSTRACT) => {
                     let text = par.text.trimmed();
@@ -1950,7 +2048,7 @@ impl Checker<'_> {
                     let Some(loc) = par.text.whole() else {
                         continue;
                     };
-                    self.keywords_count(words.len(), loc.clone());
+                    self.keywords_count(words.len(), loc.clone(), KEYWORDS_LINE);
                     let keys: Vec<_> = words.iter().map(|w| collation_key(w)).collect();
                     if let Some(i) = out_of_order(&keys) {
                         // Рядок набрано в коді дослівно: його можна впорядкувати
@@ -1966,11 +2064,12 @@ impl Checker<'_> {
                         self.add(
                             "keywords-order",
                             Some(loc),
-                            format!(
+                            Msg::from(format!(
                                 "ключові слова не за абеткою: «{}» стоїть після «{}»",
                                 words[i],
                                 words[i - 1]
-                            ),
+                            ))
+                            .guessed(KEYWORDS_LINE),
                             fix.into_iter().collect(),
                         );
                     }
@@ -1980,7 +2079,7 @@ impl Checker<'_> {
         }
     }
 
-    fn keywords_count(&mut self, count: usize, loc: Loc) {
+    fn keywords_count(&mut self, count: usize, loc: Loc, guess: &'static str) {
         if !(5..=15).contains(&count) {
             self.add(
                 "keywords-count",
@@ -1988,7 +2087,8 @@ impl Checker<'_> {
                 with_help(
                     format!("ключових слів у рефераті: {count}"),
                     "Дібрати від 5 до 15",
-                ),
+                )
+                .guessed(guess),
                 Vec::new(),
             );
         }
@@ -1998,7 +2098,8 @@ impl Checker<'_> {
     /// колонка таблиці, позиції переліку чи абзаци «ЕОМ – …» поспіль.
     fn abbreviations(&mut self) {
         let work = self.work;
-        let mut groups: Vec<Vec<(String, Loc)>> = Vec::new();
+        // Групи термінів і чи вони лише вгадані
+        let mut groups: Vec<(Vec<(String, Loc)>, bool)> = Vec::new();
         let mut prev_par: Option<usize> = None;
         let term = |text: &Text| -> Option<(String, Loc)> {
             let s = text.trimmed();
@@ -2019,24 +2120,31 @@ impl Checker<'_> {
         };
         for (i, block) in work.elements.iter().enumerate() {
             match block {
-                Element::Terms(terms) => groups.push(terms.iter().filter_map(whole).collect()),
+                Element::Terms(terms) => {
+                    if let Some(t) = terms.known() {
+                        groups.push((t.iter().filter_map(whole).collect(), terms.assumed()));
+                    }
+                }
                 Element::List(list) if list.section == Some(ABBREVIATIONS) && !list.nested => {
-                    groups.push(list.items.iter().filter_map(|it| term(&it.text)).collect());
+                    groups.push((
+                        list.items.iter().filter_map(|it| term(&it.text)).collect(),
+                        true,
+                    ));
                 }
                 Element::Par(par) if par.section == Some(ABBREVIATIONS) => {
                     let Some(entry) = term(&par.text) else {
                         continue;
                     };
                     if prev_par != Some(i.wrapping_sub(1)) {
-                        groups.push(Vec::new());
+                        groups.push((Vec::new(), true));
                     }
                     prev_par = Some(i);
-                    groups.last_mut().unwrap().push(entry);
+                    groups.last_mut().unwrap().0.push(entry);
                 }
                 _ => {}
             }
         }
-        for group in groups {
+        for (group, guessed) in groups {
             let keys: Vec<_> = group.iter().map(|(t, _)| collation_key(t)).collect();
             let Some(i) = out_of_order(&keys) else {
                 continue;
@@ -2050,6 +2158,8 @@ impl Checker<'_> {
             } else {
                 format!("скорочення не за абеткою: «{term}» стоїть після «{prev}»")
             };
+            let msg = Msg::from(msg);
+            let msg = if guessed { msg.guessed(TERMS) } else { msg };
             self.add("abbrev-order", Some(loc.clone()), msg, Vec::new());
         }
     }
@@ -2093,12 +2203,8 @@ impl Checker<'_> {
     /// лишають, а слово перед посиланням не повторюють.
     fn refs(&mut self) {
         let (work, code) = (self.work, self.code);
-        // Власне show-правило `ref` чи `set ref(supplement: …)`: як друкується
-        // посилання, з коду не видно
-        if work.ref_style.custom {
-            return;
-        }
-        let mut kinds: std::collections::HashMap<&str, RefKind> = Default::default();
+        // Вид цілі й чи він лише припущення (додаток за ознаками)
+        let mut kinds: std::collections::HashMap<&str, (RefKind, bool)> = Default::default();
         for block in &work.elements {
             let (label, kind) = match block {
                 Element::Figure(f) => (
@@ -2109,12 +2215,18 @@ impl Checker<'_> {
                     },
                 ),
                 Element::Equation(q) => (&q.label, RefKind::Equation),
-                Element::Heading(h) if h.appendix && h.level == 1 => (&h.label, RefKind::Appendix),
+                Element::Heading(h) if h.appendix.is(&true) && h.level == 1 => {
+                    (&h.label, RefKind::Appendix)
+                }
                 Element::Heading(h) => (&h.label, RefKind::Section),
                 _ => continue,
             };
+            let assumed = match block {
+                Element::Heading(h) => matches!(kind, RefKind::Appendix) && h.appendix.assumed(),
+                _ => false,
+            };
             if let Some(Label::Name(name)) = label {
-                kinds.insert(name, kind);
+                kinds.insert(name, (kind, assumed));
             }
         }
         // Підпис, заданий документом (`set figure(supplement: [рис.])`),
@@ -2123,11 +2235,19 @@ impl Checker<'_> {
         let equation_lower = work.ref_style.lower_equation;
         let heading_lower = work.ref_style.lower_heading;
         for r in &work.ref_uses {
-            if r.supplement {
+            // Підпис задано, або як друкується посилання, не видно (власне
+            // show-правило `ref`, шаблон, якого не простежити)
+            if r.supplement || r.typst_form.sure() != Some(&true) {
                 continue;
             }
-            let Some(&kind) = kinds.get(r.target.as_str()) else {
+            let Some(&(kind, assumed)) = kinds.get(r.target.as_str()) else {
                 continue;
+            };
+            let guessed = |mut m: Msg| {
+                if assumed {
+                    m.assumed = Some(APPENDIX);
+                }
+                m
             };
             let (stems, printed, short): (&[&str], &str, Option<&str>) = match kind {
                 RefKind::Image => (&["рисун", "рис."], "Рисунок N", Some("рис.")),
@@ -2169,9 +2289,9 @@ impl Checker<'_> {
                 self.add(
                     "ref-supplement",
                     Some(node),
-                    format!(
+                    guessed(Msg::from(format!(
                         "перед {shown} уже стоїть «{word}», а посилання ще й друкує «{printed}»: вийде «{word} {printed}»"
-                    ),
+                    ))),
                     fix.into_iter().collect(),
                 );
                 continue;
@@ -2200,12 +2320,12 @@ impl Checker<'_> {
             self.add(
                 "ref-supplement",
                 Some(node),
-                with_help(
+                guessed(with_help(
                     format!(
                         "{shown} посеред речення друкує «{printed}» з великої літери в називному відмінку"
                     ),
                     format!("Писати {}", example.replace("@x", &shown)),
-                ),
+                )),
                 fix.into_iter().collect(),
             );
         }
@@ -2219,7 +2339,7 @@ impl Checker<'_> {
         let mut seen = 0u32;
         for block in &work.elements {
             let texts: Vec<&Text> = match block {
-                Element::Heading(h) if h.appendix => break,
+                Element::Heading(h) if h.appendix.is(&true) => break,
                 Element::Par(p) if p.section != Some(BIBLIOGRAPHY) => vec![&p.text],
                 Element::List(l) if !matches!(l.section, Some(BIBLIOGRAPHY | ABBREVIATIONS)) => {
                     l.items.iter().map(|i| &i.text).collect()
@@ -2497,21 +2617,18 @@ impl Checker<'_> {
         let mut indented = Vec::new();
         // Перші абзаци після заголовка, рисунка, переліку
         let mut after_block = Vec::new();
-        let mut started = false;
+        // Основний текст: після титульного аркуша
+        let body_start = work.body_start();
         let mut prev_par = false;
-        for e in &work.elements {
+        for (k, e) in work.elements.iter().enumerate() {
             match e {
-                Element::Heading(_) => started = true,
                 Element::Par(p) => {
                     all.push(p.look);
-                    // Основний текст: після першого заголовка (не титульний аркуш)
-                    let head = p.text.trimmed().to_lowercase();
-                    let unindented =
-                        head == "де" || head.starts_with("де ") || head.starts_with("примітк");
+                    let role = p.role;
                     // Примітки мають власний кегль і інтервал (`note-size`)
-                    if started && !head.starts_with("примітк") {
+                    if body_start.is_some_and(|b| k >= b) && role != Role::Note {
                         body.push(p.look);
-                        if !unindented {
+                        if role == Role::Text {
                             indented.push(p.look);
                             if !prev_par {
                                 after_block.push(p.look);

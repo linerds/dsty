@@ -892,15 +892,23 @@ impl<'a> Evaluator<'a> {
             let Some(manifest) = (self.load)(&dir.join("typst.toml")) else {
                 continue;
             };
-            let entry = toml::from_str::<toml::Table>(&manifest)
-                .ok()
-                .and_then(|t| {
-                    t.get("package")?
-                        .get("entrypoint")?
-                        .as_str()
-                        .map(str::to_owned)
-                })
-                .unwrap_or_else(|| "lib.typ".into());
+            let table = toml::from_str::<toml::Table>(&manifest).ok();
+            let field = |key: &str| {
+                table
+                    .as_ref()?
+                    .get("package")?
+                    .get(key)?
+                    .as_str()
+                    .map(str::to_owned)
+            };
+            // Інша версія чи назва в маніфесті: typst такого пакунка не
+            // відкриває, тож і шаблону з нього не буде
+            if field("version").is_some_and(|v| v != version)
+                || field("name").is_some_and(|n| n != name)
+            {
+                return None;
+            }
+            let entry = field("entrypoint").unwrap_or_else(|| "lib.typ".into());
             return self.file_id(&dir.join(entry.trim_start_matches('/')), &dir);
         }
         None
@@ -3056,9 +3064,19 @@ mod tests {
             ("/pkgs/local/t/0.1.0/src/style.typ", style),
         ];
         assert_eq!(show(&list, "tpl"), "text(size)[BODY]");
+
         assert_eq!(
             show(&list, "tpl.with(..toml(\"/doc.toml\").meta)"),
             "text(size)[BODY]"
         );
+        // У теці версії лежить інша версія: typst її не відкриває
+        let other = manifest.replace("0.1.0", "0.3.0");
+        let bad = [
+            ("/p/main.typ", main),
+            ("/pkgs/local/t/0.1.0/typst.toml", other.as_str()),
+            ("/pkgs/local/t/0.1.0/src/lib.typ", lib),
+            ("/pkgs/local/t/0.1.0/src/style.typ", style),
+        ];
+        assert_eq!(show(&bad, "tpl"), "?[BODY]");
     }
 }

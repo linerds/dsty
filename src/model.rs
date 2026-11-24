@@ -153,8 +153,8 @@ impl Code {
     }
 }
 
-/// Як друкуються посилання; `custom`: власне show-правило `ref` у документі.
-fn ref_style(code: &Code, custom: bool) -> work::RefStyle {
+/// Як друкуються посилання.
+fn ref_style(code: &Code) -> work::RefStyle {
     // Підпис, заданий документом (`set figure(supplement: [рис.])`), може
     // бути з малої літери
     let lowercase = |target: &str| {
@@ -166,7 +166,6 @@ fn ref_style(code: &Code, custom: bool) -> work::RefStyle {
             })
     };
     work::RefStyle {
-        custom: custom || code.set_rule("ref", "supplement").is_some(),
         lower_figure: lowercase("figure"),
         lower_equation: lowercase("math.equation"),
         lower_heading: lowercase("heading"),
@@ -244,7 +243,6 @@ pub fn build(
         work: Work::default(),
         styles: vec![Style::default()],
         pending: Vec::new(),
-        custom_ref: false,
         outline_style: None,
         tick: 0,
         including: vec![main.to_path_buf()],
@@ -285,7 +283,6 @@ pub fn build(
         mut work,
         code,
         styles,
-        custom_ref,
         outline_style,
         ..
     } = walker;
@@ -299,7 +296,7 @@ pub fn build(
     work.contents = outline_style
         .flatten()
         .map(|s| s.text_look(&|_| At::default("text", &["hyphenate"])));
-    work.ref_style = ref_style(&code, custom_ref);
+    work.ref_style = ref_style(&code);
     Some((work, code))
 }
 
@@ -355,13 +352,46 @@ fn module_paths(node: &SyntaxNode, out: &mut Vec<String>) {
 }
 
 /// Налаштування, що діють на наступний вміст (як `set`/`show` у Typst).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 struct Scope {
     /// Заголовки нумеруються: `set heading(numbering: …)` чи застосований шаблон.
     numbered: bool,
-    appendix: bool,
+    /// Вміст у додатках: `Some(true)` за ознаками (нумерація літерою, підпис
+    /// «Додаток»), `Some(false)` — ознак немає, `None` — не видно (шаблон чи
+    /// функція нумерації, яких не простежити).
+    appendix: Option<bool>,
     /// Налаштування тексту й сторінки: індекс у `Walker::styles`.
     style: usize,
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        Scope {
+            numbered: false,
+            appendix: Some(false),
+            style: 0,
+        }
+    }
+}
+
+impl Scope {
+    /// Чи елемент у `loc` у додатках: що так — лише припущення за ознаками,
+    /// що ні — видно з коду (ознак немає).
+    fn appendix(&self, loc: &Loc) -> Fact<bool> {
+        match self.appendix {
+            Some(true) => Fact::inferred(true, loc.clone()),
+            Some(false) => Fact::new(false, work::Basis::Code, At::Element(loc.clone())),
+            None => Fact::Unknown,
+        }
+    }
+
+    /// Нумерацію змінено невідомо як: додаток це чи ні, вже не видно (хіба
+    /// що вже є ознаки додатка).
+    fn forget_appendix(&mut self) {
+        if self.appendix != Some(true) {
+            self.appendix = None;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -410,8 +440,6 @@ struct Walker<'a> {
     styles: Vec<Style>,
     /// Те, що знадобиться після обходу, для кожного елемента.
     pending: Vec<Pending>,
-    /// Власне show-правило `ref` у коді документа.
-    custom_ref: bool,
     /// Налаштування тексту в пунктах змісту (`outline`); `Some(None)`: не видно.
     outline_style: Option<Option<Style>>,
     tick: usize,
@@ -509,6 +537,7 @@ impl Walker<'_> {
         let first_look = self.para_inline.take();
         self.emit(
             Element::Par(work::Par {
+                role: work::Role::of(text.as_str(), after_equation),
                 text,
                 after_equation,
                 section: self.section(),
@@ -545,6 +574,7 @@ impl Walker<'_> {
             loc: cx.loc(node),
             supplement,
             before: text[from..].to_owned(),
+            typst_form: look::ref_form(&self.styles[self.para_style]),
         });
     }
 
@@ -656,7 +686,7 @@ impl Walker<'_> {
                         let mut ignored = Text::default();
                         self.inline_markup(cx, term.description(), &mut ignored);
                     }
-                    self.terms(texts);
+                    self.terms(texts, work::Basis::Code);
                     self.last = Last::Other;
                     i = last + 1;
                     continue;
@@ -852,7 +882,7 @@ impl Walker<'_> {
                 level: h.depth().get(),
                 title,
                 numbered: scope.numbered,
-                appendix: scope.appendix,
+                appendix: scope.appendix(&loc),
                 label,
                 loc,
                 generated: false,
@@ -948,7 +978,7 @@ impl Walker<'_> {
                 level: 1,
                 title: text,
                 numbered: false,
-                appendix: false,
+                appendix: Fact::Unknown,
                 label: None,
                 loc,
                 generated: true,
@@ -1299,13 +1329,14 @@ impl Walker<'_> {
             align: None,
         });
         let counter = self.counters.clone();
+        let appendix = scope.appendix(&loc);
         self.emit(
             Element::Equation(work::Equation {
                 loc,
                 label,
                 follows,
                 referenced: false,
-                appendix: scope.appendix,
+                appendix,
                 look,
                 chapter: counter.as_ref().and_then(|c| c.first().copied()),
                 number: Fact::Unknown,
@@ -1632,7 +1663,7 @@ impl Walker<'_> {
                         level,
                         title,
                         numbered,
-                        appendix: scope.appendix,
+                        appendix: scope.appendix(&loc),
                         label,
                         loc,
                         generated: false,
@@ -1879,7 +1910,7 @@ impl Walker<'_> {
                 floating,
                 loc: site.clone(),
                 look: Rc::new(look),
-                appendix: scope.appendix,
+                appendix: scope.appendix(site),
                 chapter: counter.as_ref().and_then(|c| c.first().copied()),
                 number: Fact::Unknown,
                 printed: Fact::Unknown,
@@ -2007,7 +2038,7 @@ impl Walker<'_> {
                 text
             })
             .collect();
-        self.terms(texts);
+        self.terms(texts, work::Basis::Inferred);
     }
 
     /// `keywords: (…)` у виклику (`abstract`) чи словнику рецепта.
@@ -2030,10 +2061,11 @@ impl Walker<'_> {
                         ast::ArrayItem::Spread(_) => return,
                     }
                 }
+                let loc = cx.loc(array.to_untyped());
                 self.emit(
                     Element::Keywords {
-                        count,
-                        loc: cx.loc(array.to_untyped()),
+                        count: Fact::inferred(count, loc.clone()),
+                        loc,
                     },
                     Pending::None,
                 );
@@ -2062,11 +2094,17 @@ impl Walker<'_> {
         self.work.bibs.push(Bib { full, style });
     }
 
-    /// Терміни переліку скорочень (лише в ньому).
-    fn terms(&mut self, terms: Vec<Text>) {
-        if self.section() == Some(crate::rules::ABBREVIATIONS) && terms.len() > 1 {
-            self.emit(Element::Terms(terms), Pending::None);
+    /// Терміни переліку скорочень (лише в ньому): `basis` каже, чи це
+    /// терміни з розмітки, чи лише вгадана колонка таблиці.
+    fn terms(&mut self, terms: Vec<Text>, basis: work::Basis) {
+        if self.section() != Some(crate::rules::ABBREVIATIONS) || terms.len() < 2 {
+            return;
         }
+        let Some(loc) = terms.iter().find_map(Text::whole) else {
+            return;
+        };
+        let terms = Fact::new(terms, basis, At::Element(loc));
+        self.emit(Element::Terms(terms), Pending::None);
     }
 
     // --- Правила й файли ----------------------------------------------------------
@@ -2122,8 +2160,12 @@ impl Walker<'_> {
                 }
             }
             // `show par: it => …`: абзаци змінено невідомо як
-            _ if body => self.restyle(scope, None, &cx.loc(show.to_untyped())),
-            _ if name == "ref" => self.custom_ref = true,
+            // (нумерації заголовків це не стосується)
+            _ if body => {
+                let appendix = scope.appendix;
+                self.restyle(scope, None, &cx.loc(show.to_untyped()));
+                scope.appendix = appendix;
+            }
             _ => {}
         }
         // Оформлення елемента (`show heading: …`, `show figure.caption: …`)
@@ -2193,9 +2235,15 @@ impl Walker<'_> {
     fn restyle(&mut self, scope: &mut Scope, effects: Option<&[Effect]>, site: &Loc) {
         let mut style = self.styles[scope.style].clone();
         match effects {
-            None => style.forget(),
+            None => {
+                style.forget();
+                scope.forget_appendix();
+            }
             Some(effects) => {
                 for effect in effects {
+                    if matches!(effect, Effect::Opaque) {
+                        scope.forget_appendix();
+                    }
                     style.apply_effect(effect, &|set: &SetEffect, arg: &SetArg| {
                         self.origin(set, arg, site)
                     });
@@ -2230,6 +2278,11 @@ impl Walker<'_> {
             .iter()
             .position(|e| matches!(e, Element::Heading(_)));
         let title = first.and(self.title_style);
+        // Титульний аркуш — усе до першого заголовка: лише припущення
+        let title_page = match first.map(|k| (k, &elements[k])) {
+            Some((k, Element::Heading(h))) => Fact::inferred(k, h.loc.clone()),
+            _ => Fact::Unknown,
+        };
         let first = first.unwrap_or(0);
         let body = elements
             .get(first..)
@@ -2248,6 +2301,7 @@ impl Walker<'_> {
         let style = self.styles[body].clone();
         let title = title.map(|t| self.styles[t].clone());
         self.work.pages = Some(look::pages(&mut self.ev, &style, title.as_ref()));
+        self.work.title_page = title_page;
     }
 
     /// Після обходу: оформлення формул (з посиланнями на них) і надруковані
@@ -2577,30 +2631,42 @@ fn heading_set(scope: &mut Scope, set: &SetEffect) {
     if let Some(a) = set.arg("numbering") {
         match &a.value {
             Value::None => scope.numbered = false,
-            Value::Unknown => {}
+            Value::Unknown => scope.forget_appendix(),
             Value::Str(p) => {
                 scope.numbered = true;
                 if p.trim_start().starts_with(['А', 'A']) {
-                    scope.appendix = true;
+                    scope.appendix = Some(true);
+                } else if scope.appendix.is_none() {
+                    scope.appendix = Some(false);
                 }
             }
-            _ => scope.numbered = true,
+            _ => {
+                scope.numbered = true;
+                // Функція нумерації: літеру видно лише з першого номера
+                if set
+                    .arg("numbering-first")
+                    .and_then(|a| a.value.text())
+                    .is_none()
+                {
+                    scope.forget_appendix();
+                }
+            }
         }
     }
     // Функція нумерації дає першому заголовку літеру: «А»
-    if set
-        .arg("numbering-first")
-        .and_then(|a| a.value.text())
-        .is_some_and(|t| t.trim_start().starts_with(['А', 'A']))
-    {
-        scope.appendix = true;
+    if let Some(first) = set.arg("numbering-first").and_then(|a| a.value.text()) {
+        if first.trim_start().starts_with(['А', 'A']) {
+            scope.appendix = Some(true);
+        } else if scope.appendix.is_none() {
+            scope.appendix = Some(false);
+        }
     }
     if set
         .arg("supplement")
         .and_then(|a| a.value.text())
         .is_some_and(|t| t.contains("Додаток"))
     {
-        scope.appendix = true;
+        scope.appendix = Some(true);
     }
 }
 

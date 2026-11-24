@@ -123,6 +123,31 @@ fn page_text_and_headings() {
 }
 
 #[test]
+fn title_page_from_layout() {
+    if typst().is_none() {
+        return;
+    }
+    // Заголовок на першій сторінці: текст перед ним не титульний аркуш, а
+    // основний текст, і номер на першій сторінці стандарт дозволяє
+    let dir = temp_dir("title");
+    let found = check(
+        &dir,
+        r#"#set page(numbering: "1", number-align: top + right)
+#set text(size: 14pt, lang: "uk")
+#text(size: 10pt)[Вступний рядок перед першим заголовком.]
+= Вступ
+Текст роботи.
+"#,
+        &[],
+    );
+    expect(&found, &[("font-size", "Вступний рядок")]);
+    assert!(
+        !has(&found, "page-number", "на титульному аркуші"),
+        "{found:?}"
+    );
+}
+
+#[test]
 fn figures_tables_formulas_footnotes() {
     if typst().is_none() {
         return;

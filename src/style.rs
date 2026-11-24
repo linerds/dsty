@@ -162,11 +162,9 @@ fn body_place(p: TextProp) -> At {
     }
 }
 
+/// Підстава відомого значення; невідоме вважається типовим.
 fn basis<T>(f: &Fact<T>) -> Basis {
-    match f.origin() {
-        Some(_) => Basis::Code,
-        None => Basis::Default,
-    }
+    f.basis().unwrap_or(Basis::Default)
 }
 
 /// Довжина в пунктах за кеглю `size`.
@@ -194,7 +192,7 @@ impl Style {
                 None => Fact::Unknown,
                 Some(j) => Fact::new(
                     *j,
-                    basis(&self.justify).min(basis(&self.hyphenate)),
+                    basis(&self.justify).join(basis(&self.hyphenate)),
                     match self.justify.origin().or(self.hyphenate.origin()) {
                         Some(o) => At::Rule(o.clone()),
                         None => place(TextProp::Hyphenate),

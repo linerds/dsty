@@ -65,6 +65,28 @@ fn fixed(src: &str) -> String {
     lint::apply_fixes(src, &diags).0
 }
 
+/// Код після швидких виправлень редактора: перше виправлення суті кожного
+/// зауваження, також того, що спирається на припущення (`--fix` таких не
+/// застосовує).
+fn quick_fixed(src: &str) -> String {
+    apply_quick(src, &run(src))
+}
+
+/// Перше виправлення суті кожного з `diags`, як його пропонує редактор.
+fn apply_quick(src: &str, diags: &[Diagnostic]) -> String {
+    let mut edits: Vec<_> = diags
+        .iter()
+        .filter_map(|d| d.fixes.iter().find(|f| f.is_correction))
+        .flat_map(|f| f.edits.clone())
+        .collect();
+    edits.sort_by_key(|e| std::cmp::Reverse(e.range.start));
+    let mut out = src.to_owned();
+    for e in edits {
+        out.replace_range(e.range.clone(), &e.new);
+    }
+    out
+}
+
 /// Обгортки мінішаблону.
 const TPL: &str = "#import \"/tpl.typ\": *\n";
 /// Документ за мінішаблоном.
@@ -249,8 +271,11 @@ fn numbered_list_without_references() {
     let diags = run(src);
     let found: Vec<_> = diags.iter().map(|d| (d.rule, pointed(src, d))).collect();
     assert_eq!(found, [("list-unreferenced", "+")], "{diags:?}");
+    // Посилання шукаються лише за зразками: виправлення пропонується, але
+    // `--fix` його не застосовує
+    assert_eq!(fixed(src), src);
     assert_eq!(
-        fixed(src),
+        quick_fixed(src),
         "Завдання:\n- завдання 1: розробити;\n- завдання 2: перевірити.\n"
     );
     // Посилання на позицію, маркований і вкладений перелік: мовчить
@@ -296,7 +321,7 @@ fn formula_where() {
         diags.iter().map(|d| d.rule).collect::<Vec<_>>(),
         ["formula-where"]
     );
-    assert!(fixed(src).contains("де $s$ -- шлях."));
+    assert!(quick_fixed(src).contains("де $s$ -- шлях."));
 }
 
 #[test]
@@ -436,7 +461,7 @@ fn broken_source_still_checked() {
 #[test]
 fn fix_all_repeats_until_stable() {
     // Велика літера й крапка: спершу лише list-case, після нього крапка
-    let src = "Визначити:\n1. Швидкість потоку.\n2. Обрати модуляцію.\n3. розробити схему.\n";
+    let src = "Визначити:\n- Швидкість потоку.\n- Обрати модуляцію.\n- розробити схему.\n";
     let root = PathBuf::from("/project");
     let main = root.join("main.typ");
     let load = |p: &Path| (p == main).then(|| src.to_owned());
@@ -445,7 +470,7 @@ fn fix_all_repeats_until_stable() {
         fixed.files[&main],
         "Визначити:\n- швидкість потоку;\n- обрати модуляцію;\n- розробити схему.\n"
     );
-    assert_eq!(fixed.count, 5);
+    assert_eq!(fixed.count, 4);
 }
 
 fn run_with(src: &str, enable: &[&str]) -> Vec<Diagnostic> {
@@ -468,10 +493,13 @@ fn structure_names() {
             ("structure-name", "Література")
         ]
     );
-    assert_eq!(fixed(src), "= Висновки\n== Перелік джерел посилання\n");
+    assert_eq!(
+        quick_fixed(src),
+        "= Висновки\n== Перелік джерел посилання\n"
+    );
     // Для набраного великими літерами виправлення теж великими
     assert_eq!(
-        fixed("= СПИСОК ЛІТЕРАТУРИ\n"),
+        quick_fixed("= СПИСОК ЛІТЕРАТУРИ\n"),
         "= ПЕРЕЛІК ДЖЕРЕЛ ПОСИЛАННЯ\n"
     );
     // Записи переліку джерел під неканонічною назвою не перевіряються як перелік за 7.7
@@ -512,16 +540,61 @@ fn bibliography_arguments() {
 }
 
 #[test]
+fn assumptions() {
+    // Примітку й пояснення познак стандарт визначає першим словом: це видно
+    // з коду напевно, тож `--fix` їх виправляє
+    let src = "Формула\n$ v = s / t, $\nде: $s$ -- шлях.\n\nПримітка: пояснення.\n";
+    let diags = run(src);
+    assert_eq!(
+        diags.iter().map(|d| d.rule).collect::<Vec<_>>(),
+        ["formula-where", "note-format", "note-format"]
+    );
+    assert!(diags.iter().all(|d| d.assumed.is_none()), "{diags:?}");
+    assert_eq!(
+        fixed(src),
+        "Формула\n$ v = s / t, $\nде $s$ -- шлях.\n\nПримітка. Пояснення.\n"
+    );
+    // Слово лише схоже на «Примітка»; «де» не під формулою
+    assert!(rules("Примітками називають пояснення.\n\nДе: в тексті.\n").is_empty());
+    // Назва структурного елемента вгадана з поширеного варіанта: зауваження
+    // так і каже, а `--fix` його не перейменовує
+    let src = "= Література\n";
+    let diags = run(src);
+    assert_eq!(diags.len(), 1);
+    assert!(diags[0].assumed.is_some());
+    assert!(diags[0].auto_fix().is_none());
+    assert!(diags[0].message().contains("припущення: "));
+    assert_eq!(fixed(src), src);
+}
+
+#[test]
+fn template_show_ref() {
+    // Шаблон сам друкує посилання: як саме, з коду не видно, тож про слово
+    // перед посиланням правило мовчить
+    let tpl = "#let doc(body) = {\n  show ref: it => it.element.body\n  body\n}\n";
+    let main = "#import \"/own.typ\": doc\n#show: doc\nНаведено у таблиці @t.\n\n#figure(table(columns: 1, [a]), caption: [Дані]) <t>\n";
+    let found = run_files(&[("main.typ", main), ("own.typ", tpl)], &Options::default());
+    assert!(
+        !found.diagnostics.iter().any(|d| d.rule == "ref-supplement"),
+        "{:?}",
+        found.diagnostics
+    );
+    // Без шаблону — типовий «Таблиця N» typst
+    let plain = "Наведено у таблиці @t.\n\n#figure(table(columns: 1, [a]), caption: [Дані]) <t>\n";
+    assert!(rules(plain).contains(&"ref-supplement"));
+}
+
+#[test]
 fn note_numbering() {
     // Одна примітка з номером
     let src = "Текст.\n\nПримітка 1. Пояснення.\n";
     assert_eq!(rules(src), ["note-numbering"]);
-    assert_eq!(fixed(src), "Текст.\n\nПримітка. Пояснення.\n");
+    assert_eq!(quick_fixed(src), "Текст.\n\nПримітка. Пояснення.\n");
     // Кілька поспіль: без номера й з неправильним номером
     let src = "Примітка. Перша.\n\nПримітка 3. Друга.\n\nПримітка 3. Третя.\n";
     assert_eq!(rules(src), ["note-numbering", "note-numbering"]);
     assert_eq!(
-        fixed(src),
+        quick_fixed(src),
         "Примітка 1. Перша.\n\nПримітка 2. Друга.\n\nПримітка 3. Третя.\n"
     );
     // Окремі примітки в різних місцях: кожна сама по собі
@@ -545,12 +618,7 @@ fn manual_keywords() {
     let diags = run_with(src, &["keywords-order"]);
     assert_eq!(diags.len(), 1);
     assert!(diags[0].msg.contains("«АЛГОРИТМ» стоїть після «МЕРЕЖА»"));
-    let refs: Vec<&Diagnostic> = diags.iter().collect();
-    assert!(
-        lint::apply_fixes(src, &refs)
-            .0
-            .contains("АЛГОРИТМ, БАЗА ДАНИХ, ЗАТРИМКА, МЕРЕЖА, ЯКІСТЬ.\n")
-    );
+    assert!(apply_quick(src, &diags).contains("АЛГОРИТМ, БАЗА ДАНИХ, ЗАТРИМКА, МЕРЕЖА, ЯКІСТЬ.\n"));
     // Кількість перевіряється й для набраних вручну
     assert_eq!(
         rules("= Реферат\nАЛГОРИТМ, БАЗА ДАНИХ, МЕРЕЖА.\n"),
@@ -1396,4 +1464,37 @@ fn let_destructuring_and_calc() {
             "{want}: {periods:?}"
         );
     }
+}
+
+#[test]
+fn appendix_status() {
+    // Додаток упізнано за нумерацією літерою: лише припущення
+    let diags = run("#set heading(numbering: \"А.1\")\n= додаток з малої\n");
+    let case: Vec<_> = diags.iter().filter(|d| d.rule == "appendix-case").collect();
+    assert_eq!(case.len(), 1, "{diags:?}");
+    assert!(case[0].assumed.is_some());
+    // Нумерацію видно, ознак додатка немає: що це не додаток, певно
+    let diags = run("#set heading(numbering: \"I.1\")\n= Огляд\n== Частина\n");
+    let digits: Vec<_> = diags
+        .iter()
+        .filter(|d| d.rule == "heading-number-format")
+        .collect();
+    assert!(!digits.is_empty(), "{diags:?}");
+    assert!(digits.iter().all(|d| d.assumed.is_none()), "{digits:?}");
+}
+
+#[test]
+fn structural_variant_everywhere() {
+    // «Література» лише вгадано як перелік джерел: і нова сторінка, і стиль
+    // заголовка спираються на це припущення
+    let src = "#show heading: set text(weight: 400)\n= Вступ\nТекст.\n= Література\nТекст.\n";
+    let diags = run(src);
+    let new_page: Vec<_> = diags.iter().filter(|d| d.rule == "new-page").collect();
+    assert_eq!(new_page.len(), 1, "{diags:?}");
+    assert!(new_page[0].assumed.is_some());
+    // Стиль заголовків зведено з «Вступ» (певного) і «Література»: зауваження
+    // певне, бо стосується й певного заголовка
+    let style: Vec<_> = diags.iter().filter(|d| d.rule == "heading-style").collect();
+    assert!(!style.is_empty(), "{diags:?}");
+    assert!(style.iter().all(|d| d.assumed.is_none()), "{style:?}");
 }

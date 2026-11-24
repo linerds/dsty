@@ -324,6 +324,22 @@ fn find(
     None
 }
 
+/// Чи друкується посилання (`@мітка`) під налаштуваннями `style` так, як
+/// типово в typst: підпис цілі й номер («Таблиця 1.2»). Show-правило `ref`
+/// (у документі чи шаблоні), `set ref(…)` чи перетворення, якого не
+/// простежити (невідомий шаблон): невідомо.
+pub fn ref_form(style: &Style) -> Fact<bool> {
+    for effect in style.chain.iter() {
+        match effect {
+            Effect::Opaque => return Fact::Unknown,
+            Effect::Show(s) if s.elem == "ref" => return Fact::Unknown,
+            Effect::Set(s) if s.target == "ref" => return Fact::Unknown,
+            _ => {}
+        }
+    }
+    Fact::typst(true, At::default("ref", &["supplement"]))
+}
+
 /// Символьний елемент для show-функцій: поля й текст ([`Item::Hole`]).
 pub fn symbol(func: &str, fields: Vec<(&str, Value)>) -> Rc<Elem> {
     let mut named: Vec<(String, Value)> =
@@ -467,8 +483,8 @@ pub fn pages(ev: &mut Evaluator, body: &Style, title: Option<&Style>) -> work::P
     let (mut printed, mut first) = numbered(ev, numbering);
     let side = |a: &str| if a.contains("top") { "top" } else { "bottom" };
     let align = match (&header, &footer) {
-        (None, _) | (_, None) => Fact::Unknown,
-        (Some((Some(Some(a)), o)), _) | (Some(_), Some((Some(Some(a)), o))) => {
+        // Номер друкує власний колонтитул (другого колонтитула може й не бути видно)
+        (Some((Some(Some(a)), o)), _) | (_, Some((Some(Some(a)), o))) => {
             let edge = if matches!(header, Some((Some(Some(_)), _))) {
                 "top"
             } else {
@@ -479,6 +495,13 @@ pub fn pages(ev: &mut Evaluator, body: &Style, title: Option<&Style>) -> work::P
                 (printed, first) = numbered(ev, &one);
             }
             Fact::set(format!("{a}+{edge}"), o.clone().unwrap())
+        }
+        // Колонтитула не видно: номер може друкувати він
+        (None, _) | (_, None) => {
+            if matches!(printed.known(), Some(None)) {
+                printed = Fact::Unknown;
+            }
+            Fact::Unknown
         }
         (Some((h, _)), Some((f, _))) => {
             // Типовий номер: на краю `number-align`, якщо там немає власного колонтитула

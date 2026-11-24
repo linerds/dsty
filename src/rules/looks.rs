@@ -7,11 +7,14 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::{Checker, FixDraft, Msg, spacing, structural, with_help};
+use super::{
+    APPENDIX, Checker, FixDraft, Msg, STRUCTURE_VARIANT, TITLE_PAGE, spacing, structural,
+    structural_variant, with_help,
+};
 use crate::eval::MM;
 use crate::model::Code;
 use crate::text::{Loc, fmt_num, mm, quote};
-use crate::work::{Align, At, Element, Fact, FigureKind, Heading, Lead, Scope, TextLook};
+use crate::work::{Align, At, Element, Fact, FigureKind, Heading, Lead, Role, Scope, TextLook};
 
 /// Як виправити рядок «де …» з відступом (7.10.6).
 const FROM_MARGIN: &str = "Почати від лівого берега: `#par(first-line-indent: 0pt)[де …]`";
@@ -232,6 +235,10 @@ impl Collect<'_> {
             .find(|p| p.code == code && p.loc == loc && p.key == key)
         {
             p.count += count;
+            // Хоч одне певне — і зведене зауваження певне
+            if msg.assumed.is_none() {
+                p.msg.assumed = None;
+            }
             return;
         }
         let fixes = match (value, fix) {
@@ -318,8 +325,9 @@ impl Checker<'_> {
             .iter()
             .filter(|h| {
                 h.level == 1
-                    && !h.appendix
-                    && (structural(h.title.trimmed()).is_some() || h.numbered)
+                    && !h.appendix.is(&true)
+                    && (structural(h.title.trimmed()).is_some()
+                        || (h.numbered && h.appendix.is(&false)))
                     && h.look.is_some()
             })
             .count();
@@ -338,15 +346,19 @@ impl Checker<'_> {
             .filter(|h| {
                 h.numbered
                     && h.look.is_some()
-                    && !(h.level == 1 && (h.appendix || structural(h.title.trimmed()).is_some()))
+                    && !(h.level == 1
+                        && (h.appendix.is(&true) || structural(h.title.trimmed()).is_some()))
             })
             .count();
-        let appendices = heads.iter().filter(|h| h.level == 1 && h.appendix).count();
+        let appendices = heads
+            .iter()
+            .filter(|h| h.level == 1 && h.appendix.is(&true))
+            .count();
         let mut appendix_no = 0;
         let mut latin = None;
         // Кегль і шрифт основного тексту: якщо в заголовках вони ті самі, досить
         // зауваження до основного тексту
-        let first = work.first_heading().unwrap_or(0);
+        let first = work.body_start().unwrap_or(0);
         let body: Vec<&TextLook> = work.elements[first..]
             .iter()
             .filter_map(|e| match e {
@@ -358,7 +370,7 @@ impl Checker<'_> {
             let title = h.title.trimmed();
             let shown = quote(title);
             let is_structural = h.level == 1 && structural(title).is_some();
-            let is_appendix = h.level == 1 && h.appendix;
+            let is_appendix = h.level == 1 && h.appendix.is(&true);
             if is_appendix {
                 appendix_no += 1;
             }
@@ -375,15 +387,18 @@ impl Checker<'_> {
                     shown.clone()
                 };
                 let before = self.out.len();
-                self.add(
-                    "new-page",
-                    Some(h.loc.clone()),
-                    with_help(
-                        format!("перед {name} немає розриву сторінки"),
-                        "Почати з нової сторінки: `#pagebreak()` перед заголовком",
-                    ),
-                    Vec::new(),
+                let msg = with_help(
+                    format!("перед {name} немає розриву сторінки"),
+                    "Почати з нової сторінки: `#pagebreak()` перед заголовком",
                 );
+                let msg = if !is_structural {
+                    msg.assuming(&h.appendix, APPENDIX)
+                } else if structural_variant(title) {
+                    msg.guessed(STRUCTURE_VARIANT)
+                } else {
+                    msg
+                };
+                self.add("new-page", Some(h.loc.clone()), msg, Vec::new());
                 if let Some(f) = self.out.get_mut(before) {
                     f.clause = Some(clause);
                 }
@@ -391,17 +406,27 @@ impl Checker<'_> {
             let Some(look) = &h.look else { continue };
             if let Some(text) = &look.text {
                 // 7.1.20: великими літерами, напівжирним
-                if h.level == 1 && !is_appendix && (is_structural || h.numbered) {
+                // Розділ (нумерований і точно не додаток) чи структурний елемент
+                let chapter = h.numbered && h.appendix.is(&false);
+                if h.level == 1 && !is_appendix && (is_structural || chapter) {
+                    // Перевіряється лише тому, що назву вважаємо структурною
+                    let guess = |m: Msg| {
+                        if !chapter && structural_variant(title) {
+                            m.guessed(STRUCTURE_VARIANT)
+                        } else {
+                            m
+                        }
+                    };
                     if let Fact::Known(false, why) = &text.upper
                         && has_lower(title)
                     {
                         c.add(
                             "heading-style",
                             &why.at,
-                            with_help(
+                            guess(with_help(
                                 "заголовки розділів і структурних елементів набрано не великими літерами",
                                 "Друкувати великими літерами",
-                            ),
+                            )),
                             None,
                             (styled, "заголовків"),
                             None,
@@ -413,7 +438,7 @@ impl Checker<'_> {
                         c.add(
                             "heading-style",
                             &why.at,
-                            format!("заголовки розділів і структурних елементів надруковано не напівжирним (накреслення {w})"),
+                            guess(format!("заголовки розділів і структурних елементів надруковано не напівжирним (накреслення {w})").into()),
                             None,
                             (styled, "заголовків"),
                             None,
@@ -563,7 +588,7 @@ impl Checker<'_> {
                         (numbered, "заголовків"),
                         None,
                     );
-                } else if h.appendix && !LETTERED.is_match(number) {
+                } else if h.appendix.is(&true) && !LETTERED.is_match(number) {
                     c.add_keyed(
                         "letter".into(),
                         "heading-number-format",
@@ -571,12 +596,13 @@ impl Checker<'_> {
                         with_help(
                             format!("заголовок {shown} у додатку має номер «{number}»"),
                             "Нумерувати з літерою додатка: «А.1»",
-                        ),
+                        )
+                        .assuming(&h.appendix, APPENDIX),
                         Some("7.15.2"),
                         (numbered, "заголовків"),
                         None,
                     );
-                } else if !h.appendix && !ARABIC.is_match(number) {
+                } else if h.appendix.is(&false) && !ARABIC.is_match(number) {
                     c.add_keyed(
                         "digits".into(),
                         "heading-number-format",
@@ -593,13 +619,14 @@ impl Checker<'_> {
             }
             // 6.2.2, 7.15.1: «ДОДАТОК А» над заголовком додатка
             if is_appendix && let Some(prefix) = &look.prefix {
+                let app = |m: Msg| m.assuming(&h.appendix, APPENDIX);
                 let printed = format!("{prefix} {title}");
                 let upper = look.text.as_ref().and_then(|t| t.upper.known().copied());
                 let Some(cap) = APPENDIX_WORD.captures(&printed) else {
                     self.add(
                         "appendix-letter",
                         Some(h.loc.clone()),
-                        "над заголовком додатка немає слова «ДОДАТОК» з літерою",
+                        app("над заголовком додатка немає слова «ДОДАТОК» з літерою".into()),
                         Vec::new(),
                     );
                     continue;
@@ -609,12 +636,12 @@ impl Checker<'_> {
                     self.add(
                         "appendix-letter",
                         Some(h.loc.clone()),
-                        with_help(
+                        app(with_help(
                             format!(
                                 "слово «{word}» над заголовком додатка набрано не великими літерами"
                             ),
                             "Друкувати великими літерами: «ДОДАТОК»",
-                        ),
+                        )),
                         Vec::new(),
                     );
                 }
@@ -622,7 +649,7 @@ impl Checker<'_> {
                     self.add(
                         "appendix-letter",
                         Some(h.loc.clone()),
-                        "після слова «ДОДАТОК» немає літери додатка",
+                        app("після слова «ДОДАТОК» немає літери додатка".into()),
                         Vec::new(),
                     );
                     continue;
@@ -642,7 +669,10 @@ impl Checker<'_> {
                     self.add(
                         "appendix-letter",
                         Some(h.loc.clone()),
-                        format!("додаток позначено літерою «{letter}», яку не використовують"),
+                        app(
+                            format!("додаток позначено літерою «{letter}», яку не використовують")
+                                .into(),
+                        ),
                         Vec::new(),
                     );
                 } else if expected.is_some_and(|e| letter != e.to_string())
@@ -651,10 +681,10 @@ impl Checker<'_> {
                     self.add(
                         "appendix-letter",
                         Some(h.loc.clone()),
-                        with_help(
+                        app(with_help(
                             format!("додаток позначено «{letter}» не за порядком"),
                             format!("Позначити «{}»", expected.unwrap()),
-                        ),
+                        )),
                         Vec::new(),
                     );
                 }
@@ -784,7 +814,7 @@ impl Checker<'_> {
                         (same, noun),
                         None,
                     );
-                } else if f.appendix && !LETTERED.is_match(first) {
+                } else if f.appendix.is(&true) && !LETTERED.is_match(first) {
                     c.add(
                         "object-numbering",
                         from(),
@@ -798,12 +828,13 @@ impl Checker<'_> {
                                 }
                             ),
                             "Нумерувати з літерою додатка: «А.1»",
-                        ),
+                        )
+                        .assuming(&f.appendix, APPENDIX),
                         Some("7.15.3"),
                         (same, noun),
                         None,
                     );
-                } else if !f.appendix && !ARABIC.is_match(first) {
+                } else if f.appendix.is(&false) && !ARABIC.is_match(first) {
                     c.add(
                         "object-numbering",
                         from(),
@@ -837,7 +868,7 @@ impl Checker<'_> {
         for e in &self.work.elements {
             let (kind, loc, chapter, number, numbering) = match e {
                 Element::Heading(h) if h.level == 1 => {
-                    letter = h.appendix.then(|| appendix_letter(h));
+                    letter = h.appendix.is(&true).then(|| appendix_letter(h));
                     continue;
                 }
                 Element::Figure(f) => (
@@ -940,7 +971,7 @@ impl Checker<'_> {
                         (total, "формул"),
                         None,
                     );
-                } else if q.appendix
+                } else if q.appendix.is(&true)
                     && !first
                         .trim_start_matches('(')
                         .starts_with(|ch: char| ch.is_alphabetic())
@@ -951,7 +982,8 @@ impl Checker<'_> {
                         with_help(
                             format!("формули в додатках нумеровано «{first}»"),
                             "Нумерувати з літерою додатка: «(А.1)»",
-                        ),
+                        )
+                        .assuming(&q.appendix, APPENDIX),
                         Some("7.15.3"),
                         (total, "формул"),
                         None,
@@ -1024,8 +1056,7 @@ impl Checker<'_> {
         // 7.10.6: «де …» під формулою без абзацного відступу
         for e in &work.elements {
             let Element::Par(p) = e else { continue };
-            let head = p.text.trimmed();
-            if !p.after_equation || !(head == "де" || head.starts_with("де ")) {
+            if p.role != Role::Where {
                 continue;
             }
             let look = &work.looks[p.look];
@@ -1087,10 +1118,10 @@ impl Checker<'_> {
     /// примітки: кегль, шрифт, накреслення (7.1.5, 7.8.3).
     pub(super) fn inlines(&mut self) {
         let work = self.work;
-        // До першого заголовка — титульний аркуш: там свої кеглі
-        let body = work.first_heading().unwrap_or(usize::MAX);
+        // Титульний аркуш (без заголовків — уся робота): там свої кеглі
+        let body = work.body_start().unwrap_or(usize::MAX);
         for i in &work.runs {
-            if i.element <= body {
+            if i.element < body {
                 continue;
             }
             let (style, par) = (&work.looks[i.look].text, &work.looks[i.par].text);
@@ -1116,7 +1147,11 @@ impl Checker<'_> {
             if i.emph {
                 continue;
             }
-            let note = i.text.trim_start().starts_with("Примітк");
+            // Текст у примітці: у неї свій кегль (`note-size`)
+            let note = matches!(
+                work.elements.get(i.element),
+                Some(Element::Par(p)) if p.role == Role::Note
+            );
             if let Some(&size) = style.size.known()
                 && !note
                 && style.size.known() != par.size.known()
@@ -1150,7 +1185,7 @@ impl Checker<'_> {
         // 7.8.3: примітку друкують кеглем 12 через один інтервал
         for (k, e) in work.elements.iter().enumerate() {
             let Element::Par(p) = e else { continue };
-            if k <= body || !p.text.trimmed().starts_with("Примітк") {
+            if k < body || p.role != Role::Note {
                 continue;
             }
             let size = work.looks[p.first_look.unwrap_or(p.look)]
@@ -1439,7 +1474,8 @@ impl Checker<'_> {
                 with_help(
                     format!("на титульному аркуші проставлено номер «{n}»"),
                     "Прибрати номер з титульного аркуша",
-                ),
+                )
+                .assuming(&work.title_page, TITLE_PAGE),
                 Some("7.3.3"),
                 (0, ""),
                 None,

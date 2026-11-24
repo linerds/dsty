@@ -35,6 +35,9 @@ pub struct RefUse {
     pub supplement: bool,
     /// Текст того самого абзацу перед посиланням (до 60 байтів).
     pub before: String,
+    /// Друкується як типово в typst: підпис цілі й номер. Невідомо, якщо
+    /// його змінює show-правило чи шаблон, якого не простежити.
+    pub typst_form: Fact<bool>,
 }
 
 /// `bibliography(…)` чи `set bibliography(…)`: аргументи, які перевіряє стандарт.
@@ -116,10 +119,28 @@ pub enum Basis {
     Default,
     /// Виведено рушієм: лічильники, нумерація, show-функції.
     Computed,
-    /// Евристика: титульний аркуш, «Примітка…», «де…».
+    /// Припущення: з коду значення прямо не видно, його вгадано за ознаками
+    /// (титульний аркуш — усе до першого заголовка, додаток — за літерною
+    /// нумерацією). Правило, що спирається на такий факт ([`Fact::known`]),
+    /// позначає зауваження як припущення, і `--fix` його не виправляє;
+    /// [`Fact::sure`] такого факту не бачить. Типове значення typst, яке міг
+    /// змінити код, якого не видно (невідомий шаблон), — не припущення, а
+    /// [`Fact::Unknown`].
     Inferred,
     /// З компіляції (розташування на сторінках): лише в повній перевірці.
     Layout,
+}
+
+impl Basis {
+    /// Підстава значення, виведеного з двох: припущення лишається
+    /// припущенням, інакше вирішує певніше.
+    pub fn join(self, other: Basis) -> Basis {
+        if self == Basis::Inferred || other == Basis::Inferred {
+            Basis::Inferred
+        } else {
+            self.min(other)
+        }
+    }
 }
 
 /// Де значення задано: туди вказує зауваження.
@@ -182,6 +203,15 @@ impl<T> Fact<T> {
         }
     }
 
+    /// Відоме лише як припущення ([`Basis::Inferred`]).
+    pub fn assumed(&self) -> bool {
+        self.basis() == Some(Basis::Inferred)
+    }
+
+    pub fn basis(&self) -> Option<Basis> {
+        self.why().map(|w| w.basis)
+    }
+
     pub fn why(&self) -> Option<&Why> {
         match self {
             Fact::Known(_, w) => Some(w),
@@ -209,6 +239,11 @@ impl<T> Fact<T> {
             Some(At::Rule(o)) => Some(o),
             _ => None,
         }
+    }
+
+    /// Припущення з ознак тексту про елемент у `loc`.
+    pub fn inferred(value: T, loc: Loc) -> Self {
+        Fact::new(value, Basis::Inferred, At::Element(loc))
     }
 
     /// Обчислене рушієм значення, що стоїть на самому елементі.
@@ -345,6 +380,10 @@ pub struct Work {
     pub pages: Option<PageNumbers>,
     /// `counter(page).update(…)` у документі.
     pub page_updates: Vec<Loc>,
+    /// Скільки елементів на початку стоять на титульному аркуші (0: аркуша
+    /// немає). З коду це лише припущення: усе до першого заголовка; повна
+    /// перевірка знає напевно. Без заголовків невідомо.
+    pub title_page: Fact<usize>,
     /// Оформлення тексту змісту, якщо зміст є і його видно.
     pub contents: Option<TextLook>,
     /// Скільки сторінок (повна перевірка).
@@ -359,8 +398,6 @@ pub struct Work {
 /// Як друкуються посилання.
 #[derive(Debug, Default)]
 pub struct RefStyle {
-    /// Власне show-правило `ref` чи `set ref(supplement: …)`: з коду не видно.
-    pub custom: bool,
     /// Підпис, заданий документом, з малої літери (`set figure(supplement:
     /// [рис.])`): регістр посилань на ці елементи не перевіряється.
     pub lower_figure: bool,
@@ -369,11 +406,17 @@ pub struct RefStyle {
 }
 
 impl Work {
-    /// Індекс першого заголовка: до нього титульний аркуш.
+    /// Індекс першого заголовка.
     pub fn first_heading(&self) -> Option<usize> {
         self.elements
             .iter()
             .position(|e| matches!(e, Element::Heading(_)))
+    }
+
+    /// Індекс першого елемента основного тексту: після титульного аркуша;
+    /// `None`, якщо аркуш невідомий.
+    pub fn body_start(&self) -> Option<usize> {
+        self.title_page.known().copied()
     }
 }
 
@@ -385,14 +428,15 @@ pub enum Element {
     List(List),
     Par(Par),
     /// Ключові слова з аргументу шаблону (`abstract(keywords: …)`); шаблон
-    /// сам сортує їх за абеткою.
+    /// сам сортує їх за абеткою. Що це ключові слова, видно лише з назви
+    /// аргументу, тож кількість — припущення.
     Keywords {
-        count: usize,
+        count: Fact<usize>,
         loc: Loc,
     },
-    /// Ліва колонка переліку скорочень: терміни `/ ЕОМ: …` чи перша колонка
-    /// таблиці.
-    Terms(Vec<Text>),
+    /// Ліва колонка переліку скорочень: терміни `/ ЕОМ: …` (з коду) чи перша
+    /// колонка таблиці (припущення).
+    Terms(Fact<Vec<Text>>),
     /// Зміна лічильника: нічого не друкує.
     Counter,
     /// Таблиця поза фігурою (лише з компіляції).
@@ -413,8 +457,9 @@ pub struct Heading {
     /// Заголовок розмітки (`= Назва`): місце вузла й код назви без мітки
     /// для виправлення на `#heading(…)[…]`.
     pub markup: Option<(Loc, String)>,
-    /// Заголовок у додатках.
-    pub appendix: bool,
+    /// Заголовок у додатках. Видно лише з ознак (нумерація літерою,
+    /// підпис «Додаток»), тож це припущення ([`Basis::Inferred`]).
+    pub appendix: Fact<bool>,
     /// Починається з нової сторінки.
     pub new_page: Fact<bool>,
     /// Абзацний відступ там, де стоїть заголовок, пт.
@@ -450,7 +495,8 @@ pub struct Figure {
     /// Головка таблиці.
     pub header: Option<Header>,
     pub caption: Option<Text>,
-    pub appendix: bool,
+    /// У додатках (припущення, як [`Heading::appendix`]).
+    pub appendix: Fact<bool>,
     pub look: Rc<CaptionLook>,
     /// Номер розділу (перше число лічильника заголовків).
     pub chapter: Option<i64>,
@@ -482,7 +528,8 @@ pub struct Equation {
     pub follows: bool,
     /// На формулу посилаються в тексті (мітку з виразу вважаємо посиланою).
     pub referenced: bool,
-    pub appendix: bool,
+    /// У додатках (припущення, як [`Heading::appendix`]).
+    pub appendix: Fact<bool>,
     pub look: Rc<EquationLook>,
     pub chapter: Option<i64>,
     /// Надрукований номер («(1.2)»).
@@ -523,6 +570,8 @@ pub struct Par {
     pub text: Text,
     pub section: Section,
     pub after_equation: bool,
+    /// Що це за абзац: за першим словом, як його визначає стандарт.
+    pub role: Role,
     /// Оформлення абзацу ([`Work::looks`]).
     pub look: usize,
     /// Перший рядок починається не з тексту.
@@ -530,6 +579,33 @@ pub struct Par {
     /// Абзац починається з `#text(…)[…]`: оформлення цього тексту
     /// ([`Work::looks`]).
     pub first_look: Option<usize>,
+}
+
+/// Роль абзацу, яку має окреме оформлення.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Text,
+    /// Примітка (7.8.3): починається словом «Примітка» чи «Примітки».
+    Note,
+    /// Пояснення познак під формулою (7.10.6): починається словом «де».
+    Where,
+}
+
+impl Role {
+    /// Роль за першим словом абзацу.
+    pub fn of(text: &str, after_equation: bool) -> Role {
+        let word: String = text
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_alphabetic())
+            .flat_map(char::to_lowercase)
+            .collect();
+        match word.as_str() {
+            "примітка" | "примітки" => Role::Note,
+            "де" if after_equation => Role::Where,
+            _ => Role::Text,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

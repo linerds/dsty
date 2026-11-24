@@ -502,7 +502,7 @@ impl Server {
         let mut actions = Vec::new();
         let published = lock(&self.published);
         let diagnostics = published.by_path.get(&path).cloned().unwrap_or_default();
-        let is_fixable = |d: &&lint::Diagnostic| d.fixes.iter().any(|f| f.is_correction);
+        let is_fixable = |d: &&lint::Diagnostic| d.auto_fix().is_some();
         // Інші файли документа, які є що виправити
         let elsewhere = published.document.contains(&path)
             && published.by_path.iter().any(|(p, diags)| {
@@ -543,7 +543,7 @@ impl Server {
                         changes: Some([(uri.clone(), edits)].into()),
                         ..Default::default()
                     }),
-                    is_preferred: Some(n == 0 && fix.is_correction),
+                    is_preferred: Some(n == 0 && fix.is_correction && diag.assumed.is_none()),
                     ..Default::default()
                 }));
             }
@@ -1325,6 +1325,7 @@ fn error_diagnostic(path: &Path, msg: &str) -> lint::Diagnostic {
         clause: "",
         msg: msg.to_owned(),
         help: None,
+        assumed: None,
         severity: Severity::Info,
         unnecessary: false,
         related: Vec::new(),

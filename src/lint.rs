@@ -59,6 +59,9 @@ pub struct Diagnostic {
     /// Як виправити словами правила (термінал показує це замість назви
     /// виправлення).
     pub help: Option<String>,
+    /// Припущення, на яке спирається зауваження (що вважається приміткою,
+    /// титульним аркушем): його виправлення `--fix` не застосовує.
+    pub assumed: Option<&'static str>,
     pub severity: Severity,
     /// Зайвий код (коментар, що нічого не вимикає): редактор його притінює.
     pub unnecessary: bool,
@@ -81,7 +84,19 @@ impl Diagnostic {
         if let Some(help) = &self.help {
             s.push_str(&format!("; виправлення: {help}"));
         }
+        if let Some(assumed) = self.assumed {
+            s.push_str(&format!("; припущення: {assumed}"));
+        }
         s
+    }
+
+    /// Виправлення суті, яке можна застосувати без огляду (`--fix`, «виправити
+    /// все»): не для зауважень, що спираються на припущення.
+    pub fn auto_fix(&self) -> Option<&Fix> {
+        match self.assumed {
+            Some(_) => None,
+            None => self.fixes.iter().find(|f| f.is_correction),
+        }
     }
 }
 
@@ -90,7 +105,8 @@ pub struct Fix {
     pub title: String,
     /// Заміни у файлі зауваження.
     pub edits: Vec<Edit>,
-    /// Виправлення суті, а не вимкнення правила: таке застосовує `--fix`.
+    /// Виправлення суті, а не вимкнення правила: таке застосовує `--fix`
+    /// (крім зауважень на припущеннях, див. [`Diagnostic::auto_fix`]).
     pub is_correction: bool,
 }
 
@@ -162,6 +178,9 @@ pub fn check_full(
         anyhow::bail!("не вдалося прочитати {}", main.display());
     };
     let active = |rule: &str| is_active(options, rule);
+    if let Some(facts) = facts {
+        crate::full::confirm(&mut work, facts);
+    }
     let mut found = rules::run(&work, &code, &active);
     if let Some(facts) = facts {
         crate::full::lay_out(&mut work, &code, facts);
@@ -237,6 +256,7 @@ fn merge_groups(found: Vec<Found>) -> Vec<Found> {
             continue;
         };
         let fix = f.fixes.drain(..).next();
+        let assumed = f.assumed;
         let (at, fixed) = match merged.get(&k) {
             Some(&slot) => slot,
             None => {
@@ -265,6 +285,8 @@ fn merge_groups(found: Vec<Found>) -> Vec<Found> {
             }
             None => fixed,
         };
+        // Одне виправлення на всі позиції: припущення однієї стосується всього
+        out[at].assumed = out[at].assumed.or(assumed);
         merged.insert(k, (at, fixed));
     }
     for (at, fixed) in merged.into_values() {
@@ -329,6 +351,7 @@ fn diagnostic(code: &Code, options: &Options, found: Found) -> Diagnostic {
         clause: found.clause.unwrap_or(found.rule.clause),
         msg: found.msg,
         help: found.help,
+        assumed: found.assumed,
         severity: options.severity_of(found.rule),
         unnecessary: found.rule.code == "ignore-unused",
         related,
@@ -476,7 +499,7 @@ pub fn select_fixes<'a>(text: &str, diagnostics: &[&'a Diagnostic]) -> (Vec<&'a 
     let mut edits: Vec<&Edit> = Vec::new();
     let mut count = 0;
     for diag in diagnostics {
-        let Some(fix) = diag.fixes.iter().find(|f| f.is_correction) else {
+        let Some(fix) = diag.auto_fix() else {
             continue;
         };
         let clashes = fix.edits.iter().any(|e| {

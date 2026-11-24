@@ -45,6 +45,12 @@ pub fn collect(main: &Path, settings: &Settings, options: &Options) -> anyhow::R
     run::collect(main, settings, sections(options))
 }
 
+/// Замінює припущення моделі тим, що показала розкладка: до статичних
+/// правил, щоб і вони спиралися на певне.
+pub fn confirm(work: &mut Work, facts: &Facts) {
+    check::confirm(work, facts)
+}
+
 /// Кладе в модель факти розкладки з компіляції: для правил над ними
 /// ([`crate::rules::run_layout`]).
 pub fn lay_out(work: &mut Work, code: &Code, facts: &Facts) {

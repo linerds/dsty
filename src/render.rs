@@ -271,6 +271,9 @@ pub fn diagnostic(d: &Diagnostic, file: &str, text: &str, color: bool) -> String
     if let Some(help) = d.help.as_ref().or(fix) {
         notes.push(format!("виправлення: {help}"));
     }
+    if let Some(assumed) = d.assumed {
+        notes.push(format!("припущення: {assumed}"));
+    }
     if !notes.is_empty() {
         out.push_str(&format!("{pad} {bar}\n"));
         for note in notes {
@@ -647,6 +650,7 @@ mod tests {
             clause: "7.7.2",
             msg: "крапка".into(),
             help: None,
+            assumed: None,
             severity: Severity::Warning,
             unnecessary: false,
             related: Vec::new(),

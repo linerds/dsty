@@ -250,7 +250,8 @@ fn check(args: CheckArgs) -> anyhow::Result<ExitCode> {
                         "severity": d.severity.name(),
                         "message": d.msg,
                         "help": d.help,
-                        "fixable": d.fixes.iter().any(|f| f.is_correction),
+                        "assumed": d.assumed,
+                        "fixable": d.auto_fix().is_some(),
                     })
                 })
                 .collect();
@@ -294,7 +295,7 @@ fn check(args: CheckArgs) -> anyhow::Result<ExitCode> {
         for (rule, n) in counts {
             let fixable = all
                 .iter()
-                .filter(|d| d.rule == rule && d.fixes.iter().any(|f| f.is_correction))
+                .filter(|d| d.rule == rule && d.auto_fix().is_some())
                 .count();
             let fixable = if fixable > 0 {
                 format!("  (виправних: {fixable})")
@@ -304,10 +305,7 @@ fn check(args: CheckArgs) -> anyhow::Result<ExitCode> {
             eprintln!("{n:>5}  {rule}{fixable}");
         }
     }
-    let fixable = all
-        .iter()
-        .filter(|d| d.fixes.iter().any(|f| f.is_correction))
-        .count();
+    let fixable = all.iter().filter(|d| d.auto_fix().is_some()).count();
     let hint = if fixable > 0 && !args.fix {
         format!("; автоматично виправить --fix: {fixable}")
     } else {

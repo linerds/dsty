@@ -5,7 +5,10 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::{CITE_GROUP, Checker, canonical_name, cite_out_of_order, structural, with_help};
+use super::{
+    CITE_GROUP, Checker, Msg, STRUCTURE_VARIANT, canonical_name, cite_out_of_order, structural,
+    structural_variant, with_help,
+};
 use crate::text::{mm, quote};
 use crate::work::{At, Element, FigureKind, Heading, HeadingPrint, TableSplit};
 
@@ -89,10 +92,17 @@ impl Checker<'_> {
                 && let Some(number) = &p.number
                 && !numbered_in_code
             {
+                let msg = Msg::from(format!(
+                    "структурний елемент {shown} надруковано з номером «{number}»"
+                ));
                 out.push((
                     "heading-numbered",
                     loc.clone(),
-                    format!("структурний елемент {shown} надруковано з номером «{number}»").into(),
+                    if structural_variant(&p.body) {
+                        msg.guessed(STRUCTURE_VARIANT)
+                    } else {
+                        msg
+                    },
                 ));
             }
             // 7.1.18: надрукована назва структурного елемента (заголовок, який
@@ -107,7 +117,8 @@ impl Checker<'_> {
                     with_help(
                         format!("структурний елемент надруковано як {}", quote(&p.body)),
                         format!("Перейменувати на «{canonical}»"),
-                    ),
+                    )
+                    .guessed(STRUCTURE_VARIANT),
                 ));
             }
             // 7.1.25: заголовок в останньому рядку сторінки

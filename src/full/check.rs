@@ -44,6 +44,30 @@ pub fn lay_out(work: &mut Work, code: &Code, facts: &Facts) {
     out.apply(work, code);
 }
 
+/// Титульний аркуш: з коду це все до першого заголовка, а розкладка каже,
+/// чи перший заголовок справді не на першій сторінці.
+pub fn confirm(work: &mut Work, facts: &Facts) {
+    let Some(k) = work.first_heading() else {
+        return;
+    };
+    let Some(page) = facts.entries.iter().find_map(|e| match e.item {
+        Item::Heading { .. } => Some(e.pg),
+        _ => None,
+    }) else {
+        return;
+    };
+    let Element::Heading(h) = &work.elements[k] else {
+        return;
+    };
+    let title_page = if page > 1 { k } else { 0 };
+    work.title_page = laid(title_page, &h.loc);
+    if title_page == 0
+        && let Some(pages) = &mut work.pages
+    {
+        pages.title = None;
+    }
+}
+
 /// Факт розкладки, що стоїть на елементі в `loc`.
 fn laid<T>(value: T, loc: &Loc) -> Fact<T> {
     Fact::new(value, Basis::Layout, At::Element(loc.clone()))
@@ -114,7 +138,7 @@ impl Out {
                             numbered: false,
                             generated: true,
                             markup: None,
-                            appendix: false,
+                            appendix: Fact::Unknown,
                             new_page: Fact::Unknown,
                             par_indent: Fact::Unknown,
                             look: None,
@@ -152,7 +176,7 @@ impl Out {
                         floating: false,
                         header: None,
                         caption: None,
-                        appendix: false,
+                        appendix: Fact::Unknown,
                         look: Rc::default(),
                         chapter: None,
                         number: Fact::Unknown,
@@ -195,7 +219,7 @@ impl Out {
                         label: None,
                         follows: false,
                         referenced: false,
-                        appendix: false,
+                        appendix: Fact::Unknown,
                         look: Rc::default(),
                         chapter: None,
                         number: Fact::Unknown,
@@ -241,6 +265,9 @@ fn insert(work: &mut Work, mut new: Vec<(Option<usize>, usize, Element)>) {
     }
     for r in &mut work.runs {
         r.element = map[r.element];
+    }
+    if let Fact::Known(k, _) = &mut work.title_page {
+        *k = map[*k];
     }
     work.elements = out;
 }
@@ -605,7 +632,7 @@ impl<'a> Checker<'a> {
                 ..
             } = &self.e[i].item
             {
-                let model_appendix = self.heading_model.get(&i).map(|h| h.appendix);
+                let model_appendix = self.heading_model.get(&i).map(|h| h.appendix.is(&true));
                 let printed = self
                     .heading_runs(i)
                     .iter()
