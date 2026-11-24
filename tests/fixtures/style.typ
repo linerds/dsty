@@ -37,6 +37,8 @@
   set heading(numbering: (i, ..n) => letters.at(i - 1) + numbering(".1.1", ..n))
   set heading(supplement: [Додаток])
   show heading.where(level: 1): it => {
+    // Вбудований кегль заголовка (1,4 em) діє й тут
+    set text(size: 14pt)
     pagebreak(weak: true)
     align(center)[*ДОДАТОК #counter(heading).display()* \ #it.body]
   }

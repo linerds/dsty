@@ -147,13 +147,6 @@ pub enum Reached {
     Replaced(Rc<Elem>),
 }
 
-impl Reached {
-    /// Елемент друкується вбудованим оформленням typst (сам чи замінений).
-    pub fn builtin(&self) -> bool {
-        !matches!(self, Reached::Hole)
-    }
-}
-
 /// Елемент після show-правил.
 pub struct Rendered {
     /// Налаштування на самому тексті елемента, від зовнішніх до внутрішніх.
@@ -357,17 +350,18 @@ pub fn symbol(func: &str, fields: Vec<(&str, Value)>) -> Rc<Elem> {
 }
 
 /// Налаштування тексту на самому елементі: `base` (там, де стоїть елемент),
-/// вбудоване оформлення елемента `builtin`, якщо він друкується як typst,
-/// потім налаштування show-правил.
+/// вбудоване оформлення елемента `builtin`, потім налаштування show-правил.
+/// Вбудоване оформлення (show-set typst: кегль і накреслення заголовка,
+/// кегль виноски) діє й під show-функцією, що друкує `it.body` чи щось інше.
 pub fn text_style(
     base: &Style,
     rendered: &Rendered,
     builtin: &[Effect],
     origin: &dyn Fn(&SetEffect, &SetArg) -> Origin,
 ) -> Option<Style> {
-    let reached = rendered.reached.clone()?;
+    rendered.reached.as_ref()?;
     let mut style = base.clone();
-    if reached.builtin() && !builtin.is_empty() {
+    if !builtin.is_empty() {
         for e in builtin {
             style.apply_effect(e, origin);
         }

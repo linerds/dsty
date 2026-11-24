@@ -1498,3 +1498,15 @@ fn structural_variant_everywhere() {
     assert!(!style.is_empty(), "{diags:?}");
     assert!(style.iter().all(|d| d.assumed.is_none()), "{style:?}");
 }
+
+#[test]
+fn builtin_show_set_under_show_function() {
+    // Show-функція друкує `it.body` сама, але вбудоване оформлення typst
+    // (напівжирне накреслення заголовка) однаково діє
+    let src = "#set text(size: 14pt, lang: \"uk\")\n#show heading: it => block(it.body)\n= Вступ\nТекст.\n";
+    let diags = run(src);
+    assert!(
+        !diags.iter().any(|d| d.msg.contains("не напівжирним")),
+        "{diags:?}"
+    );
+}
