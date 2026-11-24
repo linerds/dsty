@@ -1,7 +1,7 @@
 //! Зауваження для терміналу у вигляді, як їх друкує typst (codespan):
 //!
 //! ```text
-//! warning[list-punct]: крапка в кінці позиції посеред переліку, має бути «;»
+//! warning[list-punct]: крапка в кінці позиції посеред переліку
 //!     ┌─ src/main.typ:571:3
 //!     │
 //! 570 │ - регулярне оновлення програмного
@@ -267,8 +267,9 @@ pub fn diagnostic(d: &Diagnostic, file: &str, text: &str, color: bool) -> String
     if !d.clause.is_empty() {
         notes.insert(0, format!("п. {}", d.clause));
     }
-    if let Some(fix) = d.fixes.iter().find(|f| f.is_correction) {
-        notes.push(format!("виправлення: {}", fix.title));
+    let fix = d.fixes.iter().find(|f| f.is_correction).map(|f| &f.title);
+    if let Some(help) = d.help.as_ref().or(fix) {
+        notes.push(format!("виправлення: {help}"));
     }
     if !notes.is_empty() {
         out.push_str(&format!("{pad} {bar}\n"));
@@ -645,6 +646,7 @@ mod tests {
             rule: "list-punct",
             clause: "7.7.2",
             msg: "крапка".into(),
+            help: None,
             severity: Severity::Warning,
             unnecessary: false,
             related: Vec::new(),

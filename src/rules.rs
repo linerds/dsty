@@ -590,11 +590,40 @@ pub fn find(code: &str) -> Option<&'static Rule> {
     RULES.iter().find(|r| r.code == code)
 }
 
+/// Текст зауваження: що не так і окремо, як виправити.
+pub struct Msg {
+    pub text: String,
+    /// Як виправити, якщо цього не каже назва виправлення.
+    pub help: Option<String>,
+}
+
+impl From<String> for Msg {
+    fn from(text: String) -> Self {
+        Msg { text, help: None }
+    }
+}
+
+impl From<&str> for Msg {
+    fn from(text: &str) -> Self {
+        text.to_owned().into()
+    }
+}
+
+/// Зауваження з порадою, як виправити.
+pub(crate) fn with_help(text: impl Into<String>, help: impl Into<String>) -> Msg {
+    Msg {
+        text: text.into(),
+        help: Some(help.into()),
+    }
+}
+
 /// Знайдене порушення до перетворення на позиції.
 pub struct Found {
     pub rule: &'static Rule,
     pub loc: Loc,
     pub msg: String,
+    /// Як виправити (термінал показує це замість назви виправлення).
+    pub help: Option<String>,
     pub fixes: Vec<FixDraft>,
     /// Пункт стандарту саме цього зауваження, якщо правило охоплює кілька.
     pub clause: Option<&'static str>,
@@ -614,6 +643,7 @@ impl Found {
             rule,
             loc,
             msg,
+            help: None,
             fixes,
             clause: None,
             group: None,
@@ -937,7 +967,7 @@ impl Checker<'_> {
         &mut self,
         code: &str,
         loc: Option<Loc>,
-        msg: String,
+        msg: impl Into<Msg>,
         fixes: Vec<FixDraft>,
     ) -> Option<&mut Found> {
         self.add_in(None, code, loc, msg, fixes)
@@ -948,7 +978,7 @@ impl Checker<'_> {
         group: Option<Group>,
         code: &str,
         loc: Option<Loc>,
-        msg: String,
+        msg: impl Into<Msg>,
         fixes: Vec<FixDraft>,
     ) -> Option<&mut Found> {
         if !(self.active)(code) {
@@ -957,7 +987,9 @@ impl Checker<'_> {
         let (Some(rule), Some(loc)) = (find(code), loc) else {
             return None;
         };
-        let mut found = Found::new(rule, loc, msg, fixes);
+        let msg = msg.into();
+        let mut found = Found::new(rule, loc, msg.text, fixes);
+        found.help = msg.help;
         found.group = group;
         self.out.push(found);
         self.out.last_mut()
@@ -1003,9 +1035,9 @@ impl Checker<'_> {
                     "heading-empty",
                     Some(h.loc.clone()),
                     if h.level == 1 {
-                        "розділ без заголовка".into()
+                        "розділ без заголовка"
                     } else {
-                        "підрозділ без заголовка".into()
+                        "підрозділ без заголовка"
                     },
                     Vec::new(),
                 );
@@ -1041,9 +1073,9 @@ impl Checker<'_> {
                 self.add(
                     "structure-name",
                     Some(h.loc.clone()),
-                    format!(
-                        "структурний елемент називають «{canonical}», а не {}",
-                        quote(&title)
+                    with_help(
+                        format!("структурний елемент названо {}", quote(&title)),
+                        format!("Перейменувати на «{canonical}»"),
                     ),
                     fix.into_iter().collect(),
                 );
@@ -1057,10 +1089,9 @@ impl Checker<'_> {
                     h.title
                         .loc(start..start + m.len() + 1)
                         .or(Some(h.loc.clone())),
-                    format!(
-                        "скорочення «{}.» у заголовку {}: у заголовках слова не скорочують",
-                        m.as_str(),
-                        quote(&title)
+                    with_help(
+                        format!("скорочення «{}.» у заголовку {}", m.as_str(), quote(&title)),
+                        "Написати слово повністю",
                     ),
                     Vec::new(),
                 );
@@ -1107,7 +1138,10 @@ impl Checker<'_> {
                 self.add(
                     "heading-numbered",
                     Some(h.loc.clone()),
-                    format!("структурний елемент {} має бути без номера", quote(&title)),
+                    with_help(
+                        format!("структурний елемент {} пронумеровано", quote(&title)),
+                        "Прибрати номер: `#heading(numbering: none)[…]`",
+                    ),
                     fix.into_iter().collect(),
                 );
             }
@@ -1131,9 +1165,9 @@ impl Checker<'_> {
                         } else {
                             quote(&title)
                         };
-                        let msg = format!(
-                            "{name} стоїть після {}, а за стандартом має бути перед ним",
-                            quote(latest_title)
+                        let msg = with_help(
+                            format!("{name} стоїть після {}", quote(latest_title)),
+                            format!("Перенести перед {}", quote(latest_title)),
                         );
                         let before = latest_loc.clone();
                         self.add("structure-order", Some(h.loc.clone()), msg, Vec::new());
@@ -1174,7 +1208,7 @@ impl Checker<'_> {
             self.add(
                 "structure-required",
                 Some(anchor),
-                "немає нумерованих розділів суті звіту".into(),
+                "немає нумерованих розділів суті звіту",
                 Vec::new(),
             );
         }
@@ -1431,9 +1465,9 @@ impl Checker<'_> {
                         Some(punct_group(text)),
                         "list-punct",
                         loc,
-                        format!(
-                            "крапка в кінці позиції посеред переліку, має бути «;»: {}",
-                            tail(text)
+                        with_help(
+                            format!("крапка в кінці позиції посеред переліку: {}", tail(text)),
+                            "Замінити «.» на «;»",
                         ),
                         last_char_fix(&item.text, "Замінити «.» на «;»", ";")
                             .into_iter()
@@ -1446,9 +1480,9 @@ impl Checker<'_> {
                         Some(punct_group(text)),
                         "list-punct",
                         loc,
-                        format!(
-                            "остання позиція переліку закінчується «;», має бути «.»: {}",
-                            tail(text)
+                        with_help(
+                            format!("остання позиція переліку закінчується «;»: {}", tail(text)),
+                            "Замінити «;» на «.»",
                         ),
                         last_char_fix(&item.text, "Замінити «;» на «.»", ".")
                             .into_iter()
@@ -1609,8 +1643,9 @@ impl Checker<'_> {
             self.add(
                 "list-unreferenced",
                 marks.first().cloned().or(Some(first.loc.clone())),
-                format!(
-                    "позиції переліку позначено {shown}, але посилань на них немає: такі переліки позначають «–»"
+                with_help(
+                    format!("позиції переліку позначено {shown}, але посилань на них немає"),
+                    "Позначити позиції «–»",
                 ),
                 fix.into_iter().collect(),
             );
@@ -1744,8 +1779,10 @@ impl Checker<'_> {
             self.add(
                 "note-format",
                 par.text.loc(at(word)),
-                "кожну примітку подають окремо: «Примітка 1.», «Примітка 2.», а не «Примітки»"
-                    .into(),
+                with_help(
+                    "кілька приміток під одним словом «Примітки»",
+                    "Подати кожну окремо: «Примітка 1.», «Примітка 2.»",
+                ),
                 Vec::new(),
             );
             return;
@@ -1771,13 +1808,13 @@ impl Checker<'_> {
             self.add(
                 "note-format",
                 par.text.loc(at(word)),
-                format!(
-                    "після слова «Примітка» ставлять крапку, а не {}",
+                with_help(
                     if sign.is_empty() {
-                        "нічого".into()
+                        "після слова «Примітка» немає крапки".to_owned()
                     } else {
-                        format!("«{sign}»")
-                    }
+                        format!("після слова «Примітка» стоїть «{sign}»")
+                    },
+                    "Поставити крапку",
                 ),
                 fix.into_iter().collect(),
             );
@@ -1800,7 +1837,7 @@ impl Checker<'_> {
             self.add(
                 "note-format",
                 par.text.loc(range),
-                "текст примітки починають з великої літери".into(),
+                with_help("текст примітки з малої літери", "Почати з великої літери"),
                 fix.into_iter().collect(),
             );
         }
@@ -1843,7 +1880,10 @@ impl Checker<'_> {
                         self.add(
                             "note-numbering",
                             par.text.loc(start + word.start()..range.end),
-                            "одну примітку не нумерують: «Примітка.»".into(),
+                            with_help(
+                                "єдину примітку пронумеровано",
+                                "Прибрати номер: «Примітка.»",
+                            ),
                             fix.into_iter().collect(),
                         );
                     }
@@ -1872,7 +1912,10 @@ impl Checker<'_> {
                         self.add(
                             "note-numbering",
                             par.text.loc(start + word.start()..end),
-                            format!("приміток кілька, тож їх нумерують: «Примітка {expected}.»"),
+                            with_help(
+                                "приміток кілька, а цю не пронумеровано",
+                                format!("Пронумерувати: «Примітка {expected}.»"),
+                            ),
                             fix.into_iter().collect(),
                         );
                     }
@@ -1942,7 +1985,10 @@ impl Checker<'_> {
             self.add(
                 "keywords-count",
                 Some(loc),
-                format!("ключових слів у рефераті: {count}, має бути від 5 до 15"),
+                with_help(
+                    format!("ключових слів у рефераті: {count}"),
+                    "Дібрати від 5 до 15",
+                ),
                 Vec::new(),
             );
         }
@@ -2016,8 +2062,7 @@ impl Checker<'_> {
                 self.add(
                     "bibliography-full",
                     Some(loc.clone()),
-                    "`full: true` друкує в переліку й джерела, на які немає посилань у тексті"
-                        .into(),
+                    "`full: true` друкує в переліку й джерела, на які немає посилань у тексті",
                     vec![FixDraft {
                         title: "Друкувати лише джерела з посиланнями".into(),
                         edits: vec![(loc.clone(), "false".into())],
@@ -2030,8 +2075,11 @@ impl Checker<'_> {
                 self.add(
                     "bibliography-style",
                     Some(loc.clone()),
-                    format!(
-                        "стиль «{style}» посилається на джерела автором і роком чи виноскою, а за стандартом — номером у квадратних дужках"
+                    with_help(
+                        format!(
+                            "стиль «{style}» посилається на джерела автором і роком чи виноскою"
+                        ),
+                        "Посилатися номером у квадратних дужках",
                     ),
                     Vec::new(),
                 );
@@ -2152,9 +2200,11 @@ impl Checker<'_> {
             self.add(
                 "ref-supplement",
                 Some(node),
-                format!(
-                    "{shown} посеред речення друкує «{printed}» з великої літери в називному відмінку; пишуть {}",
-                    example.replace("@x", &shown)
+                with_help(
+                    format!(
+                        "{shown} посеред речення друкує «{printed}» з великої літери в називному відмінку"
+                    ),
+                    format!("Писати {}", example.replace("@x", &shown)),
                 ),
                 fix.into_iter().collect(),
             );
@@ -2190,8 +2240,9 @@ impl Checker<'_> {
                         self.add(
                             "citation-order",
                             text.loc(start..whole.end()),
-                            format!(
-                                "джерело [{n}] згадано раніше за [{expected}]: джерела нумерують у порядку першого посилання в тексті"
+                            with_help(
+                                format!("джерело [{n}] згадано раніше за [{expected}]"),
+                                "Нумерувати джерела в порядку першого посилання в тексті",
                             ),
                             Vec::new(),
                         );
@@ -2255,8 +2306,7 @@ impl Checker<'_> {
                     file: loc.file,
                     range: loc.range.end - 1..loc.range.end,
                 }),
-                "за формулою одразу йде наступна: формули, не відокремлені текстом, розділяють комами"
-                    .into(),
+                "за формулою одразу йде наступна без коми",
                 vec![fix],
             );
             if next.file == loc.file {
@@ -2493,7 +2543,7 @@ impl Checker<'_> {
         let mut report = |n: (usize, usize),
                           code: &'static str,
                           at: &At,
-                          msg: String,
+                          msg: Msg,
                           fix: Option<(&str, &str)>| {
             collect.add_paragraphs(code, at, msg, n, fix);
         };
@@ -2508,9 +2558,9 @@ impl Checker<'_> {
                     n,
                     "font-size",
                     &why.at,
-                    format!(
-                        "основний текст набрано кеглем {}, має бути 14",
-                        fmt_num(*size)
+                    with_help(
+                        format!("основний текст набрано кеглем {}", fmt_num(*size)),
+                        "Набрати кеглем 14",
                     ),
                     Some(("Замінити на 14pt", "14pt")),
                 );
@@ -2522,7 +2572,10 @@ impl Checker<'_> {
                     n,
                     "font-family",
                     &why.at,
-                    format!("основний текст набрано шрифтом «{font}», має бути Times New Roman"),
+                    with_help(
+                        format!("основний текст набрано шрифтом «{font}»"),
+                        "Набрати шрифтом Times New Roman",
+                    ),
                     Some(("Замінити на Times New Roman", "\"Times New Roman\"")),
                 );
             }
@@ -2539,10 +2592,13 @@ impl Checker<'_> {
                     n,
                     "line-spacing",
                     &why.at,
-                    format!(
-                        "основний текст набрано приблизно через {} інтервалу (leading {} em), має бути 1,5–2",
-                        fmt_num(spacing(em, 0.662)),
-                        fmt_num(em)
+                    with_help(
+                        format!(
+                            "основний текст набрано приблизно через {} інтервалу (leading {} em)",
+                            fmt_num(spacing(em, 0.662)),
+                            fmt_num(em)
+                        ),
+                        "Набрати через 1,5–2 інтервали",
                     ),
                     None,
                 );
@@ -2555,14 +2611,14 @@ impl Checker<'_> {
             if let Fact::Known(d, why) = &look.indent {
                 let d = *d;
                 let msg = if d.abs() < 0.01 {
-                    Some(
-                        "в абзацах немає абзацного відступу, має бути п'ять знаків (≈ 12,5 мм)"
-                            .into(),
-                    )
+                    Some(with_help(
+                        "в абзацах немає абзацного відступу",
+                        "Задати відступ у п'ять знаків (≈ 12,5 мм)",
+                    ))
                 } else if !(10.0 * MM - 0.3..=15.0 * MM + 0.3).contains(&d) {
-                    Some(format!(
-                        "абзацний відступ {}, має дорівнювати п'яти знакам (≈ 12,5 мм)",
-                        mm(d)
+                    Some(with_help(
+                        format!("абзацний відступ {}", mm(d)),
+                        "Задати відступ у п'ять знаків (≈ 12,5 мм)",
                     ))
                 } else {
                     None
@@ -2584,7 +2640,10 @@ impl Checker<'_> {
                     (0, 0),
                     "par-indent",
                     &why.at,
-                    "перший абзац після заголовка, рисунка чи переліку без відступу: задайте `first-line-indent: (amount: …, all: true)`".into(),
+                    with_help(
+                        "перший абзац після заголовка, рисунка чи переліку без відступу",
+                        "Задати `first-line-indent: (amount: …, all: true)`",
+                    ),
                     None,
                 );
             }
@@ -2600,20 +2659,15 @@ impl Checker<'_> {
                         let (s, l) = (w.min(h), w.max(h));
                         let a4 = near(s, 210.0 * MM) && near(l, 297.0 * MM);
                         let a3 = near(s, 297.0 * MM) && near(l, 420.0 * MM);
-                        (!a4 && !a3).then(|| {
-                            format!(
-                                "формат {} × {}, має бути А4 (210 мм × 297 мм)",
-                                mm(w),
-                                mm(h)
-                            )
-                        })
+                        (!a4 && !a3).then(|| format!("формат {} × {}", mm(w), mm(h)))
                     }
-                    _ => page
-                        .name
-                        .as_ref()
-                        .map(|n| format!("формат «{n}», має бути А4 (210 мм × 297 мм)")),
+                    _ => page.name.as_ref().map(|n| format!("формат «{n}»")),
                 };
                 if let Some(msg) = msg {
+                    let msg = with_help(
+                        msg,
+                        "Задати А4 (210 мм × 297 мм): `set page(paper: \"a4\")`",
+                    );
                     report(n, "page-size", &why.at, msg, None);
                 }
             }
@@ -2632,12 +2686,15 @@ impl Checker<'_> {
                         n,
                         "page-margins",
                         &m[bad].1.at,
-                        format!(
-                            "береги верхній {}, нижній {}, лівий {}, правий {}; рекомендовано не менше 20, 20, 25 і 10 мм",
-                            mm(t),
-                            mm(b),
-                            mm(l),
-                            mm(r)
+                        with_help(
+                            format!(
+                                "береги верхній {}, нижній {}, лівий {}, правий {}",
+                                mm(t),
+                                mm(b),
+                                mm(l),
+                                mm(r)
+                            ),
+                            "Рекомендовано не менше 20, 20, 25 і 10 мм",
                         ),
                         None,
                     );

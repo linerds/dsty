@@ -767,7 +767,7 @@ fn ignore_comment_problems() {
         found,
         [("ignore-unknown", "list-cse"), ("list-case", "Велика.")]
     );
-    assert!(diags[0].msg.contains("можливо, «list-case»"));
+    assert_eq!(diags[0].fixes[0].title, "Замінити на «list-case»");
     assert!(fixed(src).starts_with("// dstu-ignore-next-line: list-case\n"));
 
     // Нічого не вимикає: прибрати коментар (рядок цілком)
@@ -1163,7 +1163,8 @@ fn appearance_beyond_set_rules() {
     assert!(
         run(&chapters(""))
             .iter()
-            .any(|d| d.msg.contains("«2.3», за порядком має бути «2.1»"))
+            .any(|d| d.msg.contains("«2.3» не за порядком")
+                && d.help.as_deref() == Some("За порядком має бути «2.1»"))
     );
     let reset = "#show heading.where(level: 1): it => { counter(figure.where(kind: image)).update(0); it }\n";
     assert!(

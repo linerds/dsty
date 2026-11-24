@@ -249,6 +249,7 @@ fn check(args: CheckArgs) -> anyhow::Result<ExitCode> {
                         "clause": d.clause,
                         "severity": d.severity.name(),
                         "message": d.msg,
+                        "help": d.help,
                         "fixable": d.fixes.iter().any(|f| f.is_correction),
                     })
                 })

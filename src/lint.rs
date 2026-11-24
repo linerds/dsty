@@ -56,6 +56,9 @@ pub struct Diagnostic {
     pub rule: &'static str,
     pub clause: &'static str,
     pub msg: String,
+    /// Як виправити словами правила (термінал показує це замість назви
+    /// виправлення).
+    pub help: Option<String>,
     pub severity: Severity,
     /// Зайвий код (коментар, що нічого не вимикає): редактор його притінює.
     pub unnecessary: bool,
@@ -68,13 +71,17 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    /// Текст повідомлення для редактора й консолі.
+    /// Текст повідомлення для редактора й консолі в один рядок: суть, пункт
+    /// стандарту й виправлення.
     pub fn message(&self) -> String {
-        if self.clause.is_empty() {
-            self.msg.clone()
-        } else {
-            format!("{} (п. {})", self.msg, self.clause)
+        let mut s = self.msg.clone();
+        if !self.clause.is_empty() {
+            s.push_str(&format!(" (п. {})", self.clause));
         }
+        if let Some(help) = &self.help {
+            s.push_str(&format!("; виправлення: {help}"));
+        }
+        s
     }
 }
 
@@ -234,6 +241,8 @@ fn merge_groups(found: Vec<Found>) -> Vec<Found> {
             Some(&slot) => slot,
             None => {
                 let group = f.group.take().expect("ключ групи");
+                // Порада однієї позиції не стосується зведеного зауваження
+                f.help = None;
                 f.msg = format!(
                     "{} з {} {}; перша: {}",
                     counts[&k], group.total, group.summary, group.example
@@ -319,6 +328,7 @@ fn diagnostic(code: &Code, options: &Options, found: Found) -> Diagnostic {
         rule: found.rule.code,
         clause: found.clause.unwrap_or(found.rule.clause),
         msg: found.msg,
+        help: found.help,
         severity: options.severity_of(found.rule),
         unnecessary: found.rule.code == "ignore-unused",
         related,
@@ -647,9 +657,6 @@ impl Suppressions {
                     if !unknown_on {
                         continue;
                     }
-                    let hint = closest_rule(name)
-                        .map(|r| format!(": можливо, «{r}»"))
-                        .unwrap_or_default();
                     let fixes = closest_rule(name)
                         .map(|r| FixDraft {
                             title: format!("Замінити на «{r}»"),
@@ -660,7 +667,7 @@ impl Suppressions {
                     out.push(Found::new(
                         rule("ignore-unknown"),
                         loc,
-                        format!("невідоме правило «{name}» у dstu-ignore{hint}"),
+                        format!("невідоме правило «{name}» у dstu-ignore"),
                         fixes,
                     ));
                     continue;

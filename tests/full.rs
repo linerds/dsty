@@ -39,7 +39,7 @@ fn check(dir: &Path, src: &str, enable: &[&str]) -> Vec<(String, String)> {
     report
         .diagnostics
         .iter()
-        .map(|d| (d.rule.to_owned(), d.msg.clone()))
+        .map(|d| (d.rule.to_owned(), d.message()))
         .collect()
 }
 
@@ -107,7 +107,7 @@ fn page_text_and_headings() {
             ("par-indent", "5 мм"),
             ("par-indent", "перший абзац після заголовка"),
             ("heading-style", "великими літерами"),
-            ("heading-number-format", "крапку не ставлять"),
+            ("heading-number-format", "Прибрати крапку після номера"),
             ("heading-indent", "з абзацного відступу"),
             ("new-page", "«Висновки»"),
         ],
@@ -579,7 +579,7 @@ fn own_page_foreground() {
 "#,
         &[],
     );
-    expect(&found, &[("page-size", "має бути А4")]);
+    expect(&found, &[("page-size", "Задати А4")]);
     assert!(
         !found.iter().any(|(r, _)| r == "abstract-counts"),
         "{found:?}"

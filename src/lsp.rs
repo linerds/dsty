@@ -1324,6 +1324,7 @@ fn error_diagnostic(path: &Path, msg: &str) -> lint::Diagnostic {
         rule: "",
         clause: "",
         msg: msg.to_owned(),
+        help: None,
         severity: Severity::Info,
         unnecessary: false,
         related: Vec::new(),

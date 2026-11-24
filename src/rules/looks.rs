@@ -7,11 +7,16 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::{Checker, FixDraft, spacing, structural};
+use super::{Checker, FixDraft, Msg, spacing, structural, with_help};
 use crate::eval::MM;
 use crate::model::Code;
 use crate::text::{Loc, fmt_num, mm, quote};
 use crate::work::{Align, At, Element, Fact, FigureKind, Heading, Lead, Scope, TextLook};
+
+/// Як виправити рядок «де …» з відступом (7.10.6).
+const FROM_MARGIN: &str = "Почати від лівого берега: `#par(first-line-indent: 0pt)[де …]`";
+/// Як виправити перервану нумерацію сторінок (7.3.2).
+const THROUGH: &str = "Нумерувати сторінки наскрізно, враховуючи титульний аркуш";
 
 /// Літери додатків (7.15.1): українська абетка без Ґ, Є, З, І, Ї, Й, О, Ч, Ь
 /// або латинська без I та O.
@@ -98,7 +103,7 @@ struct Grouped {
     /// Однакові причини зводяться в одне зауваження.
     key: String,
     loc: Loc,
-    msg: String,
+    msg: Msg,
     clause: Option<&'static str>,
     count: usize,
     total: usize,
@@ -158,12 +163,13 @@ impl Collect<'_> {
         &mut self,
         code: &'static str,
         at: &At,
-        msg: String,
+        msg: impl Into<Msg>,
         clause: Option<&'static str>,
         count: (usize, &'static str),
         fix: Option<(&str, &str)>,
     ) {
-        let key = msg.clone();
+        let msg = msg.into();
+        let key = msg.text.clone();
         self.add_keyed(key, code, at, msg, clause, count, fix);
     }
 
@@ -175,7 +181,7 @@ impl Collect<'_> {
         key: String,
         code: &'static str,
         at: &At,
-        msg: String,
+        msg: impl Into<Msg>,
         clause: Option<&'static str>,
         (total, noun): (usize, &'static str),
         fix: Option<(&str, &str)>,
@@ -188,12 +194,13 @@ impl Collect<'_> {
         &mut self,
         code: &'static str,
         at: &At,
-        msg: String,
+        msg: impl Into<Msg>,
         (count, total): (usize, usize),
         fix: Option<(&str, &str)>,
     ) {
+        let msg = msg.into();
         self.insert(
-            msg.clone(),
+            msg.text.clone(),
             code,
             at,
             msg,
@@ -209,7 +216,7 @@ impl Collect<'_> {
         key: String,
         code: &'static str,
         at: &At,
-        msg: String,
+        msg: impl Into<Msg>,
         clause: Option<&'static str>,
         (count, total, noun): (usize, usize, &'static str),
         fix: Option<(&str, &str)>,
@@ -217,7 +224,8 @@ impl Collect<'_> {
         let Some((loc, suffix, value)) = place(self.code, self.scope, at) else {
             return;
         };
-        let msg = format!("{msg}{}", suffix.unwrap_or_default());
+        let mut msg = msg.into();
+        msg.text.push_str(&suffix.unwrap_or_default());
         if let Some(p) = self
             .list
             .iter_mut()
@@ -285,11 +293,10 @@ impl Checker<'_> {
     /// Зауваження з [`Collect`]: одне на причину, з кількістю елементів.
     pub(super) fn add_collected(&mut self, c: Collect) {
         for p in c.list {
-            let msg = if p.total > 1 && p.count < p.total {
-                format!("{} ({} {} з {})", p.msg, p.count, p.noun, p.total)
-            } else {
-                p.msg
-            };
+            let mut msg = p.msg;
+            if p.total > 1 && p.count < p.total {
+                msg.text = format!("{} ({} {} з {})", msg.text, p.count, p.noun, p.total);
+            }
             if let Some(f) = self.add(p.code, Some(p.loc), msg, p.fixes) {
                 f.clause = p.clause;
             }
@@ -371,7 +378,10 @@ impl Checker<'_> {
                 self.add(
                     "new-page",
                     Some(h.loc.clone()),
-                    format!("{name} має починатися з нової сторінки: перед ним немає розриву сторінки (`#pagebreak()`)"),
+                    with_help(
+                        format!("перед {name} немає розриву сторінки"),
+                        "Почати з нової сторінки: `#pagebreak()` перед заголовком",
+                    ),
                     Vec::new(),
                 );
                 if let Some(f) = self.out.get_mut(before) {
@@ -388,8 +398,10 @@ impl Checker<'_> {
                         c.add(
                             "heading-style",
                             &why.at,
-                            "заголовки розділів і структурних елементів друкують великими літерами"
-                                .into(),
+                            with_help(
+                                "заголовки розділів і структурних елементів набрано не великими літерами",
+                                "Друкувати великими літерами",
+                            ),
                             None,
                             (styled, "заголовків"),
                             None,
@@ -417,7 +429,10 @@ impl Checker<'_> {
                         c.add(
                             "heading-style",
                             text.upper.at().expect("відоме"),
-                            "заголовки додатків надруковано великими літерами, а друкують малими з першої великої".into(),
+                            with_help(
+                                "заголовки додатків надруковано великими літерами",
+                                "Друкувати малими літерами з першої великої",
+                            ),
                             Some("6.2.2"),
                             (appendices, "додатків"),
                             None,
@@ -427,7 +442,10 @@ impl Checker<'_> {
                         self.add(
                             "heading-style",
                             Some(h.loc.clone()),
-                            format!("заголовок додатка {shown} набрано великими літерами, а друкують малими з першої великої"),
+                            with_help(
+                                format!("заголовок додатка {shown} набрано великими літерами"),
+                                "Друкувати малими літерами з першої великої",
+                            ),
                             Vec::new(),
                         );
                         if let Some(f) = self.out.get_mut(before) {
@@ -443,10 +461,13 @@ impl Checker<'_> {
                     c.add(
                         "font-size",
                         &why.at,
-                        format!(
-                            "заголовки рівня {} набрано кеглем {}, має бути 14",
-                            h.level,
-                            fmt_num(*size)
+                        with_help(
+                            format!(
+                                "заголовки рівня {} набрано кеглем {}",
+                                h.level,
+                                fmt_num(*size)
+                            ),
+                            "Набрати кеглем 14",
                         ),
                         None,
                         (of_level(h.level), "заголовків"),
@@ -460,7 +481,10 @@ impl Checker<'_> {
                     c.add(
                         "font-family",
                         &why.at,
-                        format!("заголовки набрано шрифтом «{font}», має бути Times New Roman"),
+                        with_help(
+                            format!("заголовки набрано шрифтом «{font}»"),
+                            "Набрати шрифтом Times New Roman",
+                        ),
                         None,
                         (total, "заголовків"),
                         Some(("Замінити на Times New Roman", "\"Times New Roman\"")),
@@ -471,7 +495,10 @@ impl Checker<'_> {
                     c.add(
                         "heading-hyphen",
                         &why.at,
-                        "у заголовках увімкнено переноси слів: задайте `show heading: set text(hyphenate: false)`".into(),
+                        with_help(
+                            "у заголовках увімкнено переноси слів",
+                            "Вимкнути: `show heading: set text(hyphenate: false)`",
+                        ),
                         None,
                         (total, "заголовків"),
                         None,
@@ -487,7 +514,10 @@ impl Checker<'_> {
                     c.add(
                         "heading-indent",
                         &why.at,
-                        "заголовки підрозділів і пунктів вирівняно посередині, а друкують з абзацного відступу".into(),
+                        with_help(
+                            "заголовки підрозділів і пунктів вирівняно посередині",
+                            "Друкувати з абзацного відступу",
+                        ),
                         None,
                         (sub, "заголовків"),
                         None,
@@ -499,11 +529,13 @@ impl Checker<'_> {
                     c.add(
                         "heading-indent",
                         &why.at,
-                        format!(
-                            "заголовки рівня {} починаються за {} від берега, а друкують з абзацного відступу ({})",
-                            h.level,
-                            mm(off),
-                            mm(indent)
+                        with_help(
+                            format!(
+                                "заголовки рівня {} починаються за {} від берега",
+                                h.level,
+                                mm(off)
+                            ),
+                            format!("Друкувати з абзацного відступу ({})", mm(indent)),
                         ),
                         None,
                         (sub, "заголовків"),
@@ -523,7 +555,10 @@ impl Checker<'_> {
                         "period".into(),
                         "heading-number-format",
                         &why.at,
-                        format!("після номера заголовка крапку не ставлять: «{number}»"),
+                        with_help(
+                            format!("після номера заголовка стоїть крапка: «{number}»"),
+                            "Прибрати крапку після номера",
+                        ),
                         None,
                         (numbered, "заголовків"),
                         None,
@@ -533,7 +568,10 @@ impl Checker<'_> {
                         "letter".into(),
                         "heading-number-format",
                         &why.at,
-                        format!("заголовок {shown} у додатку має номер «{number}», а номери в додатках — з літерою додатка: «А.1»"),
+                        with_help(
+                            format!("заголовок {shown} у додатку має номер «{number}»"),
+                            "Нумерувати з літерою додатка: «А.1»",
+                        ),
                         Some("7.15.2"),
                         (numbered, "заголовків"),
                         None,
@@ -543,7 +581,10 @@ impl Checker<'_> {
                         "digits".into(),
                         "heading-number-format",
                         &why.at,
-                        format!("заголовок {shown} має номер «{number}», а номери розділів і підрозділів — арабськими цифрами через крапку"),
+                        with_help(
+                            format!("заголовок {shown} має номер «{number}»"),
+                            "Нумерувати арабськими цифрами через крапку",
+                        ),
                         None,
                         (numbered, "заголовків"),
                         None,
@@ -558,7 +599,7 @@ impl Checker<'_> {
                     self.add(
                         "appendix-letter",
                         Some(h.loc.clone()),
-                        "над заголовком додатка немає слова «ДОДАТОК» з літерою".into(),
+                        "над заголовком додатка немає слова «ДОДАТОК» з літерою",
                         Vec::new(),
                     );
                     continue;
@@ -568,7 +609,12 @@ impl Checker<'_> {
                     self.add(
                         "appendix-letter",
                         Some(h.loc.clone()),
-                        format!("слово «{word}» над заголовком додатка друкують великими літерами: «ДОДАТОК»"),
+                        with_help(
+                            format!(
+                                "слово «{word}» над заголовком додатка набрано не великими літерами"
+                            ),
+                            "Друкувати великими літерами: «ДОДАТОК»",
+                        ),
                         Vec::new(),
                     );
                 }
@@ -576,7 +622,7 @@ impl Checker<'_> {
                     self.add(
                         "appendix-letter",
                         Some(h.loc.clone()),
-                        "після слова «ДОДАТОК» немає літери додатка".into(),
+                        "після слова «ДОДАТОК» немає літери додатка",
                         Vec::new(),
                     );
                     continue;
@@ -605,9 +651,9 @@ impl Checker<'_> {
                     self.add(
                         "appendix-letter",
                         Some(h.loc.clone()),
-                        format!(
-                            "додаток позначено «{letter}», а за порядком має бути «{}»",
-                            expected.unwrap()
+                        with_help(
+                            format!("додаток позначено «{letter}» не за порядком"),
+                            format!("Позначити «{}»", expected.unwrap()),
                         ),
                         Vec::new(),
                     );
@@ -659,9 +705,12 @@ impl Checker<'_> {
                         c.add(
                             "caption-supplement",
                             &why.at,
-                            format!(
-                                "підписи {names} починаються з «{}», а мають зі слова «{word}»",
-                                s.split_whitespace().next().unwrap_or(s)
+                            with_help(
+                                format!(
+                                    "підписи {names} починаються з «{}»",
+                                    s.split_whitespace().next().unwrap_or(s)
+                                ),
+                                format!("Починати зі слова «{word}»"),
                             ),
                             None,
                             (same, names),
@@ -683,8 +732,9 @@ impl Checker<'_> {
                                 format!("sep {sep}"),
                                 "caption-separator",
                                 &why.at,
-                                format!(
-                                    "у підписах між номером і назвою {what} «{sep}», а ставлять тире: «Рисунок 1 – Назва»; задайте `set figure.caption(separator: [ -- ])`"
+                                with_help(
+                                    format!("у підписах між номером і назвою {what} «{sep}»"),
+                                    "Ставити тире («Рисунок 1 – Назва»): `set figure.caption(separator: [ -- ])`",
                                 ),
                                 None,
                                 (captioned, "підписів"),
@@ -700,18 +750,17 @@ impl Checker<'_> {
                 && *top != is_table
             {
                 let msg = if is_table {
-                    "назви таблиць розміщено під таблицями, а розміщують над ними: `show figure.where(kind: table): set figure.caption(position: top)`"
+                    with_help(
+                        "назви таблиць розміщено під таблицями",
+                        "Розміщувати над ними: `show figure.where(kind: table): set figure.caption(position: top)`",
+                    )
                 } else {
-                    "назви рисунків розміщено над рисунками, а розміщують під ними"
+                    with_help(
+                        "назви рисунків розміщено над рисунками",
+                        "Розміщувати під ними",
+                    )
                 };
-                c.add(
-                    "caption-position",
-                    &why.at,
-                    msg.into(),
-                    None,
-                    (same, names),
-                    None,
-                );
+                c.add("caption-position", &why.at, msg, None, (same, names), None);
             }
             // 7.5.6, 7.6.4, 7.15.3: номер арабськими цифрами без крапки, у
             // додатках з літерою
@@ -727,7 +776,10 @@ impl Checker<'_> {
                     c.add(
                         "object-numbering",
                         from(),
-                        format!("після номера {noun} («{first}») крапку не ставлять"),
+                        with_help(
+                            format!("після номера {noun} стоїть крапка: «{first}»"),
+                            "Прибрати крапку після номера",
+                        ),
                         None,
                         (same, noun),
                         None,
@@ -736,7 +788,17 @@ impl Checker<'_> {
                     c.add(
                         "object-numbering",
                         from(),
-                        format!("{} у додатках нумеровано «{first}», а нумерують з літерою додатка: «А.1»", if is_table { "таблиці" } else { "рисунки" }),
+                        with_help(
+                            format!(
+                                "{} у додатках нумеровано «{first}»",
+                                if is_table {
+                                    "таблиці"
+                                } else {
+                                    "рисунки"
+                                }
+                            ),
+                            "Нумерувати з літерою додатка: «А.1»",
+                        ),
                         Some("7.15.3"),
                         (same, noun),
                         None,
@@ -745,13 +807,16 @@ impl Checker<'_> {
                     c.add(
                         "object-numbering",
                         from(),
-                        format!(
-                            "{} нумеровано «{first}», а нумерують арабськими цифрами",
-                            if is_table {
-                                "таблиці"
-                            } else {
-                                "рисунки"
-                            }
+                        with_help(
+                            format!(
+                                "{} нумеровано «{first}»",
+                                if is_table {
+                                    "таблиці"
+                                } else {
+                                    "рисунки"
+                                }
+                            ),
+                            "Нумерувати арабськими цифрами",
                         ),
                         None,
                         (same, noun),
@@ -830,9 +895,15 @@ impl Checker<'_> {
                     continue;
                 }
                 let msg = if kind == "equation" {
-                    format!("номер формули «({printed})», за порядком має бути «({expected})»")
+                    with_help(
+                        format!("номер формули «({printed})» не за порядком"),
+                        format!("За порядком має бути «({expected})»"),
+                    )
                 } else {
-                    format!("номер {name} «{printed}», за порядком має бути «{expected}»")
+                    with_help(
+                        format!("номер {name} «{printed}» не за порядком"),
+                        format!("За порядком має бути «{expected}»"),
+                    )
                 };
                 self.add(code, Some(e.1.clone()), msg, Vec::new());
             }
@@ -861,8 +932,9 @@ impl Checker<'_> {
                     c.add(
                         "formula-numbering",
                         &why.at,
-                        format!(
-                            "формули нумеровано «{first}» без круглих дужок, має бути «({first})»"
+                        with_help(
+                            format!("формули нумеровано «{first}» без круглих дужок"),
+                            format!("Взяти номер у дужки: «({first})»"),
                         ),
                         None,
                         (total, "формул"),
@@ -876,7 +948,10 @@ impl Checker<'_> {
                     c.add(
                         "formula-numbering",
                         &why.at,
-                        format!("формули в додатках нумеровано «{first}», а нумерують з літерою додатка: «(А.1)»"),
+                        with_help(
+                            format!("формули в додатках нумеровано «{first}»"),
+                            "Нумерувати з літерою додатка: «(А.1)»",
+                        ),
                         Some("7.15.3"),
                         (total, "формул"),
                         None,
@@ -888,8 +963,10 @@ impl Checker<'_> {
                     c.add(
                         "formula-numbering",
                         &why.at,
-                        "номери формул розміщено ліворуч, а друкують у крайньому правому положенні"
-                            .into(),
+                        with_help(
+                            "номери формул розміщено ліворуч",
+                            "Друкувати в крайньому правому положенні",
+                        ),
                         None,
                         (total, "формул"),
                         None,
@@ -907,7 +984,10 @@ impl Checker<'_> {
                 c.add(
                     "formula-center",
                     &At::default_in("math.equation", "align", &[]),
-                    format!("формули вирівняно «{a}», а подають посередині рядка"),
+                    with_help(
+                        format!("формули вирівняно «{a}»"),
+                        "Подавати посередині рядка",
+                    ),
                     None,
                     (total, "формул"),
                     None,
@@ -919,9 +999,12 @@ impl Checker<'_> {
             self.add(
                 "formula-numbering",
                 Some(loc),
-                format!(
-                    "пронумеровано {numbered} формул, з них {} без посилань у тексті: нумерують лише формули, на які посилаються",
-                    unreferenced.len()
+                with_help(
+                    format!(
+                        "пронумеровано {numbered} формул, з них {} без посилань у тексті",
+                        unreferenced.len()
+                    ),
+                    "Нумерувати лише формули, на які посилаються",
                 ),
                 Vec::new(),
             );
@@ -930,7 +1013,10 @@ impl Checker<'_> {
                 self.add(
                     "formula-numbering",
                     Some(loc),
-                    "формулу без посилання в тексті не нумерують".into(),
+                    with_help(
+                        "формулу без посилання в тексті пронумеровано",
+                        "Прибрати номер",
+                    ),
                     Vec::new(),
                 );
             }
@@ -950,34 +1036,49 @@ impl Checker<'_> {
                 Some(0.0)
             };
             let msg = match (&p.lead, indent) {
-                (Some(Lead::Break), _) => Some(
-                    "`\\` перед «де» лишає порожній рядок між формулою й поясненням, а пояснення подають безпосередньо під формулою: приберіть `\\`, а відступ зніміть так: `#par(first-line-indent: 0pt)[де …]`".to_owned(),
-                ),
+                (Some(Lead::Break), _) => Some((
+                    "`\\` перед «де» лишає порожній рядок між формулою й поясненням".to_owned(),
+                    "Прибрати `\\` і зняти відступ: `#par(first-line-indent: 0pt)[де …]`",
+                )),
                 (Some(Lead::Space(Some(h))), Some(d)) => {
                     let at = d + h;
                     if at > 1.0 {
-                        Some(format!(
-                            "рядок «де …» під формулою надруковано з відступом {}, а пояснення познак починають від лівого берега: `#par(first-line-indent: 0pt)[де …]`",
-                            mm(at)
+                        Some((
+                            format!(
+                                "рядок «де …» під формулою надруковано з відступом {}",
+                                mm(at)
+                            ),
+                            FROM_MARGIN,
                         ))
                     } else if at < -1.0 {
-                        Some(format!(
-                            "рядок «де …» під формулою виступає за лівий берег на {}: пояснення познак починають від лівого берега, оберніть його в `#par(first-line-indent: 0pt)[де …]`",
-                            mm(-at)
+                        Some((
+                            format!(
+                                "рядок «де …» під формулою виступає за лівий берег на {}",
+                                mm(-at)
+                            ),
+                            FROM_MARGIN,
                         ))
                     } else {
                         None
                     }
                 }
                 (Some(Lead::Space(None)), _) => None,
-                (None, Some(d)) if d > 1.0 => Some(format!(
-                    "рядок «де …» під формулою надруковано з абзацним відступом {}, а пояснення познак починають від лівого берега: оберніть його в `#par(first-line-indent: 0pt)[де …]`",
-                    mm(d)
+                (None, Some(d)) if d > 1.0 => Some((
+                    format!(
+                        "рядок «де …» під формулою надруковано з абзацним відступом {}",
+                        mm(d)
+                    ),
+                    FROM_MARGIN,
                 )),
                 _ => None,
             };
-            if let Some(msg) = msg {
-                self.add("formula-where-indent", p.text.whole(), msg, Vec::new());
+            if let Some((msg, help)) = msg {
+                self.add(
+                    "formula-where-indent",
+                    p.text.whole(),
+                    with_help(msg, help),
+                    Vec::new(),
+                );
             }
         }
     }
@@ -998,7 +1099,10 @@ impl Checker<'_> {
                 self.add(
                     "font-style",
                     Some(i.loc.clone()),
-                    format!("текст {shown} надруковано курсивом, а друкують прямим накресленням"),
+                    with_help(
+                        format!("текст {shown} надруковано курсивом"),
+                        "Друкувати прямим накресленням",
+                    ),
                     Vec::new(),
                 );
             } else if style.black.is(&false) && !par.black.is(&false) {
@@ -1021,9 +1125,9 @@ impl Checker<'_> {
                 self.add(
                     "font-size",
                     Some(i.loc.clone()),
-                    format!(
-                        "текст {shown} набрано кеглем {}, має бути 14",
-                        fmt_num(size)
+                    with_help(
+                        format!("текст {shown} набрано кеглем {}", fmt_num(size)),
+                        "Набрати кеглем 14",
                     ),
                     Vec::new(),
                 );
@@ -1035,7 +1139,10 @@ impl Checker<'_> {
                 self.add(
                     "font-family",
                     Some(i.loc.clone()),
-                    format!("текст {shown} набрано шрифтом «{font}», має бути Times New Roman"),
+                    with_help(
+                        format!("текст {shown} набрано шрифтом «{font}»"),
+                        "Набрати шрифтом Times New Roman",
+                    ),
                     Vec::new(),
                 );
             }
@@ -1067,7 +1174,10 @@ impl Checker<'_> {
                 self.add(
                     "note-size",
                     p.text.whole(),
-                    format!("примітку набрано {what}, має бути кеглем 12 через один"),
+                    with_help(
+                        format!("примітку набрано {what}"),
+                        "Набрати кеглем 12 через один інтервал",
+                    ),
                     Vec::new(),
                 );
             }
@@ -1093,7 +1203,10 @@ impl Checker<'_> {
                     c.add(
                         "list-marker",
                         &why.at,
-                        format!("позиції переліків позначено «{m}», а позначають знаком «тире» (–): `set list(marker: [--])`"),
+                        with_help(
+                            format!("позиції переліків позначено «{m}»"),
+                            "Позначати тире (–): `set list(marker: [--])`",
+                        ),
                         None,
                         (bullets, "переліків"),
                         None,
@@ -1102,11 +1215,15 @@ impl Checker<'_> {
                 if l.enumerated {
                     let latin = m.starts_with(|ch: char| ch.is_ascii_lowercase());
                     let msg = if !ENUM_MARK.is_match(m) || latin && m != "a)" {
-                        Some(format!(
-                            "позиції нумерованих переліків позначено «{m}», а позначають «а)» або «1)»"
+                        Some(with_help(
+                            format!("позиції нумерованих переліків позначено «{m}»"),
+                            "Позначати «а)» або «1)»",
                         ))
                     } else if m == "a)" {
-                        Some("позиції переліків позначено латинськими літерами «a)», а позначають літерами української абетки «а)»".to_owned())
+                        Some(with_help(
+                            "позиції переліків позначено латинськими літерами «a)»",
+                            "Позначати літерами української абетки: «а)»",
+                        ))
                     } else {
                         None
                     };
@@ -1132,10 +1249,9 @@ impl Checker<'_> {
                 c.add(
                     "list-indent",
                     &why.at,
-                    format!(
-                        "позиції переліку починаються за {} від берега, а абзацний відступ — {}",
-                        mm(*at),
-                        mm(par)
+                    with_help(
+                        format!("позиції переліку починаються за {} від берега", mm(*at)),
+                        format!("Починати з абзацного відступу ({})", mm(par)),
                     ),
                     None,
                     (lists.len(), "переліків"),
@@ -1157,8 +1273,9 @@ impl Checker<'_> {
             c.add(
                 "footnote-numbering",
                 &why.at,
-                format!(
-                    "виноски позначено «{m}», а позначають «1)»: `set footnote(numbering: \"1)\")`"
+                with_help(
+                    format!("виноски позначено «{m}»"),
+                    "Позначати «1)»: `set footnote(numbering: \"1)\")`",
                 ),
                 None,
                 (0, ""),
@@ -1169,14 +1286,14 @@ impl Checker<'_> {
             let len = *len;
             if !(30.0 * MM - 0.5..=40.0 * MM + 0.5).contains(&len) {
                 let msg = if len == 0.0 {
-                    "над виносками немає лінії, а відокремлюють лінією завдовжки 30–40 мм"
-                        .to_owned()
+                    "над виносками немає лінії".to_owned()
                 } else {
-                    format!(
-                        "лінія над виносками завдовжки {}, має бути 30–40 мм: `set footnote.entry(separator: line(length: 35mm))`",
-                        mm(len)
-                    )
+                    format!("лінія над виносками завдовжки {}", mm(len))
                 };
+                let msg = with_help(
+                    msg,
+                    "Відокремити лінією завдовжки 30–40 мм: `set footnote.entry(separator: line(length: 35mm))`",
+                );
                 c.add("footnote-separator", &why.at, msg, None, (0, ""), None);
             }
         }
@@ -1187,9 +1304,9 @@ impl Checker<'_> {
                 c.add(
                     "font-size",
                     &why.at,
-                    format!(
-                        "текст виносок набрано кеглем {}, має бути 12",
-                        fmt_num(*size)
+                    with_help(
+                        format!("текст виносок набрано кеглем {}", fmt_num(*size)),
+                        "Набрати кеглем 12",
                     ),
                     Some("7.9.6"),
                     (0, ""),
@@ -1203,10 +1320,13 @@ impl Checker<'_> {
                 c.add(
                     "line-spacing",
                     &why.at,
-                    format!(
-                        "текст виносок набрано приблизно через {} інтервалу (leading {} em), має бути через один",
-                        fmt_num(spacing(em, 0.662)),
-                        fmt_num(em)
+                    with_help(
+                        format!(
+                            "текст виносок набрано приблизно через {} інтервалу (leading {} em)",
+                            fmt_num(spacing(em, 0.662)),
+                            fmt_num(em)
+                        ),
+                        "Набрати через один інтервал",
                     ),
                     Some("7.9.6"),
                     (0, ""),
@@ -1223,7 +1343,10 @@ impl Checker<'_> {
             self.add(
                 "page-number",
                 Some(loc.clone()),
-                "лічильник сторінок змінено (`counter(page).update`), а сторінки нумерують наскрізно, враховуючи титульний аркуш".into(),
+                with_help(
+                    "лічильник сторінок змінено (`counter(page).update`)",
+                    THROUGH,
+                ),
                 Vec::new(),
             );
         }
@@ -1233,7 +1356,7 @@ impl Checker<'_> {
             c.add(
                 "footnote-numbering",
                 &At::default("page", &["background"]),
-                "лічильник виносок не скидається на кожній сторінці, а виноски нумерують у межах сторінки: `set page(background: counter(footnote).update(0))`".into(),
+                with_help("лічильник виносок не скидається на кожній сторінці", "Нумерувати в межах сторінки: `set page(background: counter(footnote).update(0))`"),
                 None,
                 (0, ""),
                 None,
@@ -1244,7 +1367,10 @@ impl Checker<'_> {
             Some(None) => c.add(
                 "page-number",
                 body_at.unwrap(),
-                "сторінки не пронумеровано: `set page(numbering: \"1\", number-align: top + right)`".into(),
+                with_help(
+                    "сторінки не пронумеровано",
+                    "Пронумерувати: `set page(numbering: \"1\", number-align: top + right)`",
+                ),
                 None,
                 (0, ""),
                 None,
@@ -1252,7 +1378,10 @@ impl Checker<'_> {
             Some(Some(n)) if !n.chars().all(|ch| ch.is_ascii_digit()) => c.add(
                 "page-number",
                 body_at.unwrap(),
-                format!("номер сторінки надруковано «{n}», а друкують арабськими цифрами без крапки"),
+                with_help(
+                    format!("номер сторінки надруковано «{n}»"),
+                    "Друкувати арабськими цифрами без крапки",
+                ),
                 None,
                 (0, ""),
                 None,
@@ -1262,9 +1391,9 @@ impl Checker<'_> {
                     c.add(
                         "page-number",
                         body_at.unwrap(),
-                        format!(
-                            "сторінки 2–{} без номера, а номер не ставлять лише на титульному аркуші",
-                            look.first_page - 1
+                        with_help(
+                            format!("сторінки 2–{} без номера", look.first_page - 1),
+                            "Не ставити номер лише на титульному аркуші",
                         ),
                         None,
                         (0, ""),
@@ -1275,9 +1404,9 @@ impl Checker<'_> {
                     c.add(
                         "page-number",
                         body_at.unwrap(),
-                        format!(
-                            "на с. {} надруковано номер {n}: сторінки нумерують наскрізно, враховуючи титульний аркуш",
-                            look.first_page
+                        with_help(
+                            format!("на с. {} надруковано номер {n}", look.first_page),
+                            THROUGH,
                         ),
                         None,
                         (0, ""),
@@ -1294,9 +1423,9 @@ impl Checker<'_> {
             c.add(
                 "page-number",
                 &why.at,
-                format!(
-                    "номер сторінки розміщено «{}», а ставлять праворуч у верхньому куті",
-                    a.replace('+', " + ")
+                with_help(
+                    format!("номер сторінки розміщено «{}»", a.replace('+', " + ")),
+                    "Ставити праворуч у верхньому куті",
                 ),
                 None,
                 (0, ""),
@@ -1307,7 +1436,10 @@ impl Checker<'_> {
             c.add(
                 "page-number",
                 &why.at,
-                format!("на титульному аркуші проставлено номер «{n}», а його там не ставлять"),
+                with_help(
+                    format!("на титульному аркуші проставлено номер «{n}»"),
+                    "Прибрати номер з титульного аркуша",
+                ),
                 Some("7.3.3"),
                 (0, ""),
                 None,
@@ -1323,7 +1455,10 @@ impl Checker<'_> {
             c.add(
                 "contents-hyphen",
                 &why.at,
-                "у змісті увімкнено переноси слів: `show outline.entry: set text(hyphenate: false)`".into(),
+                with_help(
+                    "у змісті увімкнено переноси слів",
+                    "Вимкнути: `show outline.entry: set text(hyphenate: false)`",
+                ),
                 None,
                 (0, ""),
                 None,
@@ -1333,10 +1468,13 @@ impl Checker<'_> {
 }
 
 /// Курсив і колір основного тексту (7.1.5): для правила `font-style`.
-pub fn body_style_issue(text: &TextLook) -> Option<(String, &At)> {
+pub fn body_style_issue(text: &TextLook) -> Option<(Msg, &At)> {
     if let Fact::Known(true, why) = &text.italic {
         return Some((
-            "основний текст набрано курсивом, а друкують прямим накресленням".into(),
+            with_help(
+                "основний текст набрано курсивом",
+                "Друкувати прямим накресленням",
+            ),
             &why.at,
         ));
     }

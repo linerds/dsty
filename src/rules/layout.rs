@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::{CITE_GROUP, Checker, canonical_name, cite_out_of_order, structural};
+use super::{CITE_GROUP, Checker, canonical_name, cite_out_of_order, structural, with_help};
 use crate::text::{mm, quote};
 use crate::work::{At, Element, FigureKind, Heading, HeadingPrint, TableSplit};
 
@@ -30,7 +30,7 @@ impl Checker<'_> {
             self.add(
                 "font-missing",
                 Some(loc.clone()),
-                "шрифту Times New Roman немає в системі: typst набирає текст запасним".into(),
+                "шрифту Times New Roman немає в системі: typst набирає текст запасним",
                 Vec::new(),
             );
         }
@@ -92,7 +92,7 @@ impl Checker<'_> {
                 out.push((
                     "heading-numbered",
                     loc.clone(),
-                    format!("структурний елемент {shown} надруковано з номером «{number}»"),
+                    format!("структурний елемент {shown} надруковано з номером «{number}»").into(),
                 ));
             }
             // 7.1.18: надрукована назва структурного елемента (заголовок, який
@@ -104,9 +104,9 @@ impl Checker<'_> {
                 out.push((
                     "structure-name",
                     loc.clone(),
-                    format!(
-                        "структурний елемент надруковано як {}, а називають «{canonical}»",
-                        quote(&p.body)
+                    with_help(
+                        format!("структурний елемент надруковано як {}", quote(&p.body)),
+                        format!("Перейменувати на «{canonical}»"),
                     ),
                 ));
             }
@@ -121,7 +121,8 @@ impl Checker<'_> {
                     format!(
                         "заголовок {shown} стоїть унизу с. {}, а текст після нього — на с. {pg}",
                         p.last_page
-                    ),
+                    )
+                    .into(),
                 ));
             }
         }
@@ -150,9 +151,9 @@ impl Checker<'_> {
             {
                 out.push((
                     f.printed.at().cloned(),
-                    format!(
-                        "{named} на с. {}, а перше посилання на с. {r}: подають не далі ніж на наступній сторінці",
-                        p.page
+                    with_help(
+                        format!("{named} на с. {}, а перше посилання на с. {r}", p.page),
+                        "Подати не далі ніж на наступній сторінці після посилання",
                     ),
                 ));
             }
@@ -248,9 +249,12 @@ impl Checker<'_> {
                 self.add(
                     "formula-numbering",
                     Some(loc),
-                    format!(
-                        "номер формули закінчується за {} від правого берега, а друкують у крайньому правому положенні",
-                        mm(gap)
+                    with_help(
+                        format!(
+                            "номер формули закінчується за {} від правого берега",
+                            mm(gap)
+                        ),
+                        "Друкувати в крайньому правому положенні",
                     ),
                     Vec::new(),
                 );
