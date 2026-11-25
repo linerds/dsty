@@ -330,7 +330,7 @@ pub struct Look {
     /// Абзацний відступ, пт.
     pub indent: Fact<f64>,
     /// Відступ і в першому абзаці після заголовка, рисунка, переліку.
-    pub indent_all: bool,
+    pub indent_all: Fact<bool>,
     pub paper: Fact<Paper>,
     /// Береги, пт: верхній, правий, нижній, лівий (`auto` розв'язано).
     pub margins: [Fact<f64>; 4],
@@ -377,7 +377,9 @@ pub struct Work {
     /// Текст з власним оформленням у рядку (`#text(…)[…]`, `_…_`).
     pub runs: Vec<Run>,
     pub footnotes: Footnotes,
-    pub pages: Option<PageNumbers>,
+    /// Оформлення нумерації сторінок по областях документа (титульний аркуш +
+    /// кожен відмінний `set page(…)` основного тексту).
+    pub pages: Vec<PageNumbers>,
     /// `counter(page).update(…)` у документі.
     pub page_updates: Vec<Loc>,
     /// Скільки елементів на початку стоять на титульному аркуші (0: аркуша
@@ -477,7 +479,7 @@ pub struct HeadingLook {
     /// Надрукований номер; `None` усередині: без номера.
     pub number: Fact<Option<String>>,
     /// Текст перед назвою («1.2», «ДОДАТОК А»).
-    pub prefix: Option<String>,
+    pub prefix: Fact<String>,
     pub align: Fact<Align>,
     /// Відступ першого рядка від лівого берега, пт.
     pub offset: Fact<f64>,
@@ -515,6 +517,8 @@ pub struct CaptionLook {
     pub separator: Fact<String>,
     /// Назва над елементом.
     pub top: Fact<bool>,
+    /// Горизонтальне вирівнювання підпису (7.5.9, 7.6.8).
+    pub align: Fact<Align>,
     /// Номер першої такої фігури, як надруковано; `None` усередині:
     /// фігури без номера.
     pub numbering: Fact<Option<String>>,
@@ -544,9 +548,11 @@ pub struct EquationLook {
     pub numbering: Fact<Option<String>>,
     /// Розміщення номера, як записано (`right`, `start + horizon`).
     pub number_align: Fact<String>,
-    /// Вирівнювання формули, як записано; відоме, лише коли формулу не
-    /// змінюють show-правила.
-    pub align: Option<String>,
+    /// Вирівнювання формули, як записано.
+    pub align: Fact<String>,
+    /// Чи show-правила справді друкують номер формули (`false`, якщо
+    /// `show math.equation: it => block(it.body)` прибирає номер).
+    pub rendered_number: Fact<bool>,
 }
 
 #[derive(Debug)]
@@ -635,6 +641,9 @@ pub struct Run {
 pub struct Footnotes {
     /// Місця виносок у коді за порядком.
     pub at: Vec<Loc>,
+    /// Початок тексту кожної виноски (у тому самому порядку, що `at`): для
+    /// прив'язки в повній перевірці.
+    pub heads: Vec<String>,
     /// Оформлення, якщо виноски є.
     pub look: Option<FootnoteLook>,
     /// Сторінки з виносками: (сторінка, скільки виносок, місце першої).
@@ -661,7 +670,7 @@ pub struct PageNumbers {
     /// Де друкується номер, як записано (`right+top`).
     pub align: Fact<String>,
     /// Лічильник виносок скидається на кожній сторінці.
-    pub footnote_reset: Option<bool>,
+    pub footnote_reset: Fact<bool>,
 }
 
 // ---------------------------------------------------------------- розкладка

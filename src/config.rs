@@ -8,7 +8,7 @@
 //! full = true                # повна перевірка нативним typst
 //! typst = "/шлях/до/typst"
 //! ignore = ["heading-single"]
-//! enable = ["unit-space", "font-style"]
+//! enable = ["units", "font-style"]
 //!
 //! [severity]
 //! list-punct = "hint"        # error, warning, info, hint або off

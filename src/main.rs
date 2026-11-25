@@ -67,7 +67,7 @@ struct CheckArgs {
     /// Правила, які не перевіряти (через кому або кількома прапорцями).
     #[arg(long, value_delimiter = ',')]
     ignore: Vec<String>,
-    /// Додаткові правила, типово вимкнені, напр. `unit-space,unit-range`.
+    /// Додаткові правила, типово вимкнені, напр. `units,list-unreferenced`.
     #[arg(long, value_delimiter = ',')]
     enable: Vec<String>,
     /// Виправити те, що можна виправити автоматично, і записати файли.
@@ -348,6 +348,13 @@ fn check_one(args: &CheckArgs, main: &Path) -> anyhow::Result<(Vec<Diagnostic>, 
     };
     let options = config.options();
     lint::validate(&options)?;
+    if args.fix {
+        let fixed = lint::fix_all(&root, main, &load, &options, None)?;
+        for (path, text) in &fixed.files {
+            write_atomic(path, text).with_context(|| format!("запис {}", path.display()))?;
+        }
+        eprintln!("dsty: виправлено: {}", fixed.count);
+    }
     let facts = if config.full == Some(true) && full::wanted(&options) {
         let settings = full::Settings {
             typst: config.typst.clone(),
@@ -364,7 +371,7 @@ fn check_one(args: &CheckArgs, main: &Path) -> anyhow::Result<(Vec<Diagnostic>, 
     } else {
         None
     };
-    let mut report = lint::check_full(&root, main, &load, &options, facts.as_ref())?;
+    let report = lint::check_full(&root, main, &load, &options, facts.as_ref())?;
     for (file, pos, path) in &report.missing {
         eprintln!(
             "dsty: {}:{}:{}: немає файлу {}",
@@ -373,17 +380,6 @@ fn check_one(args: &CheckArgs, main: &Path) -> anyhow::Result<(Vec<Diagnostic>, 
             pos.column + 1,
             render::show_path(path)
         );
-    }
-
-    if args.fix {
-        let fixed = lint::fix_all(&root, main, &load, &options, None)?;
-        for (path, text) in &fixed.files {
-            write_atomic(path, text).with_context(|| format!("запис {}", path.display()))?;
-        }
-        eprintln!("dsty: виправлено: {}", fixed.count);
-        if fixed.count > 0 {
-            report = lint::check_full(&root, main, &load, &options, facts.as_ref())?;
-        }
     }
     Ok((report.diagnostics, report.files.len()))
 }

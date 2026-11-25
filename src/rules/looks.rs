@@ -71,7 +71,7 @@ type Numbered<'a> = (&'a str, Loc, Option<String>, Option<i64>, String);
 /// Літера додатка з його заголовка: «ДОДАТОК Б» чи номер «Б».
 fn appendix_letter(h: &Heading) -> Option<String> {
     let look = h.look.as_ref()?;
-    if let Some(p) = &look.prefix
+    if let Some(p) = look.prefix.known()
         && let Some(l) = APPENDIX_WORD.captures(p).and_then(|c| c.get(2))
     {
         return Some(l.as_str().to_uppercase());
@@ -618,7 +618,7 @@ impl Checker<'_> {
                 }
             }
             // 6.2.2, 7.15.1: «ДОДАТОК А» над заголовком додатка
-            if is_appendix && let Some(prefix) = &look.prefix {
+            if is_appendix && let Some(prefix) = look.prefix.known() {
                 let app = |m: Msg| m.assuming(&h.appendix, APPENDIX);
                 let printed = format!("{prefix} {title}");
                 let upper = look.text.as_ref().and_then(|t| t.upper.known().copied());
@@ -774,23 +774,52 @@ impl Checker<'_> {
                     }
                 }
             }
-            // 7.5.9, 7.6.8: назва таблиці над нею, рисунка під ним
-            if f.caption.is_some()
-                && let Fact::Known(top, why) = &look.top
-                && *top != is_table
-            {
-                let msg = if is_table {
-                    with_help(
-                        "назви таблиць розміщено під таблицями",
-                        "Розміщувати над ними: `show figure.where(kind: table): set figure.caption(position: top)`",
-                    )
-                } else {
-                    with_help(
-                        "назви рисунків розміщено над рисунками",
-                        "Розміщувати під ними",
-                    )
-                };
-                c.add("caption-position", &why.at, msg, None, (same, names), None);
+            // 7.5.9, 7.6.8: назва таблиці над нею (ліворуч з абзацного
+            // відступу), рисунка під ним посередині рядка
+            if f.caption.is_some() {
+                if let Fact::Known(top, why) = &look.top
+                    && *top != is_table
+                {
+                    let msg = if is_table {
+                        with_help(
+                            "назви таблиць розміщено під таблицями",
+                            "Розміщувати над ними: `show figure.where(kind: table): set figure.caption(position: top)`",
+                        )
+                    } else {
+                        with_help(
+                            "назви рисунків розміщено над рисунками",
+                            "Розміщувати під ними",
+                        )
+                    };
+                    c.add("caption-position", &why.at, msg, None, (same, names), None);
+                }
+                if let Fact::Known(align, why) = &look.align {
+                    if !is_table && *align != Align::Center {
+                        c.add(
+                            "caption-position",
+                            &why.at,
+                            with_help(
+                                "назви рисунків вирівняно не посередині рядка",
+                                "Розміщувати посередині рядка",
+                            ),
+                            Some("7.5.9"),
+                            (same, names),
+                            None,
+                        );
+                    } else if is_table && *align != Align::Left {
+                        c.add(
+                            "caption-position",
+                            &why.at,
+                            with_help(
+                                "назви таблиць вирівняно не ліворуч",
+                                "Розміщувати ліворуч з абзацного відступу: `show figure.where(kind: table): set align(left)`",
+                            ),
+                            Some("7.6.8"),
+                            (same, names),
+                            None,
+                        );
+                    }
+                }
             }
             // 7.5.6, 7.6.4, 7.15.3: номер арабськими цифрами без крапки, у
             // додатках з літерою
@@ -1005,17 +1034,17 @@ impl Checker<'_> {
                     );
                 }
                 // Нумерують лише формули з посиланнями (7.10.2): лише коли
-                // show-правил формули немає (вони могли б прибрати номер)
-                if !q.referenced && look.align.is_some() {
+                // show-правила формули справді друкують номер
+                if !q.referenced && look.rendered_number.is(&true) {
                     unreferenced.push(q.loc.clone());
                 }
             }
-            if let Some(a) = &look.align
+            if let Fact::Known(a, why) = &look.align
                 && a != "center"
             {
                 c.add(
                     "formula-center",
-                    &At::default_in("math.equation", "align", &[]),
+                    &why.at,
                     with_help(
                         format!("формули вирівняно «{a}»"),
                         "Подавати посередині рядка",
@@ -1061,10 +1090,10 @@ impl Checker<'_> {
             }
             let look = &work.looks[p.look];
             // Відступ першого рядка: за `all: false` після формули його немає
-            let indent = if look.indent_all {
-                look.indent.known().copied()
-            } else {
-                Some(0.0)
+            let indent = match look.indent_all.known() {
+                Some(true) => look.indent.known().copied(),
+                Some(false) => Some(0.0),
+                None => None,
             };
             let msg = match (&p.lead, indent) {
                 (Some(Lead::Break), _) => Some((
@@ -1126,7 +1155,7 @@ impl Checker<'_> {
             }
             let (style, par) = (&work.looks[i.look].text, &work.looks[i.par].text);
             let shown = quote(&i.text);
-            if i.emph || style.italic.is(&true) && !par.italic.is(&true) {
+            if style.italic.is(&true) && !par.italic.is(&true) {
                 self.add(
                     "font-style",
                     Some(i.loc.clone()),
@@ -1147,7 +1176,7 @@ impl Checker<'_> {
             if i.emph {
                 continue;
             }
-            // Текст у примітці: у неї свій кегль (`note-size`)
+            // Текст у примітці: у неї свій кегль (`note-style`)
             let note = matches!(
                 work.elements.get(i.element),
                 Some(Element::Par(p)) if p.role == Role::Note
@@ -1206,15 +1235,17 @@ impl Checker<'_> {
                     (None, Some(em)) => format!("через {} інтервалу", fmt_num(spacing(em, 0.662))),
                     (None, None) => continue,
                 };
-                self.add(
-                    "note-size",
+                if let Some(f) = self.add(
+                    "note-style",
                     p.text.whole(),
                     with_help(
                         format!("примітку набрано {what}"),
                         "Набрати кеглем 12 через один інтервал",
                     ),
                     Vec::new(),
-                );
+                ) {
+                    f.clause = Some("7.8.3");
+                }
             }
         }
     }
@@ -1385,101 +1416,116 @@ impl Checker<'_> {
                 Vec::new(),
             );
         }
-        let Some(look) = &work.pages else { return };
-        // Лічильник виносок має починатися з 1 на кожній сторінці (7.9.2)
-        if look.footnote_reset == Some(false) && work.footnotes.at.len() >= 2 {
-            c.add(
-                "footnote-numbering",
-                &At::default("page", &["background"]),
-                with_help("лічильник виносок не скидається на кожній сторінці", "Нумерувати в межах сторінки: `set page(background: counter(footnote).update(0))`"),
-                None,
-                (0, ""),
-                None,
-            );
+        if work.pages.is_empty() {
+            return;
         }
-        let body_at = look.body.at();
-        match look.body.known() {
-            Some(None) => c.add(
-                "page-number",
-                body_at.unwrap(),
-                with_help(
-                    "сторінки не пронумеровано",
-                    "Пронумерувати: `set page(numbering: \"1\", number-align: top + right)`",
-                ),
-                None,
-                (0, ""),
-                None,
-            ),
-            Some(Some(n)) if !n.chars().all(|ch| ch.is_ascii_digit()) => c.add(
-                "page-number",
-                body_at.unwrap(),
-                with_help(
-                    format!("номер сторінки надруковано «{n}»"),
-                    "Друкувати арабськими цифрами без крапки",
-                ),
-                None,
-                (0, ""),
-                None,
-            ),
-            Some(Some(n)) => {
-                if look.first_page > 2 {
-                    c.add(
-                        "page-number",
-                        body_at.unwrap(),
-                        with_help(
-                            format!("сторінки 2–{} без номера", look.first_page - 1),
-                            "Не ставити номер лише на титульному аркуші",
-                        ),
-                        None,
-                        (0, ""),
-                        None,
-                    );
-                }
-                if n.parse::<i64>().is_ok_and(|n| n != look.first_page) {
-                    c.add(
-                        "page-number",
-                        body_at.unwrap(),
-                        with_help(
-                            format!("на с. {} надруковано номер {n}", look.first_page),
-                            THROUGH,
-                        ),
-                        None,
-                        (0, ""),
-                        None,
-                    );
-                }
-            }
-            None => {}
-        }
-        if matches!(look.body.known(), Some(Some(_)))
-            && let Fact::Known(a, why) = &look.align
-            && !((a.contains("right") || a.contains("end")) && a.contains("top"))
+        // Лічильник виносок має починатися з 1 на кожній сторінці (7.9.2):
+        // якщо жодна область не скидає його (і є певне `false`), повідомляємо
+        let any_reset = work.pages.iter().any(|p| p.footnote_reset.is(&true));
+        if !any_reset
+            && work.footnotes.at.len() >= 2
+            && let Some(why) = work.pages.iter().find_map(|p| match &p.footnote_reset {
+                Fact::Known(false, why) => Some(why),
+                _ => None,
+            })
         {
             c.add(
-                "page-number",
+                "footnote-numbering",
                 &why.at,
                 with_help(
-                    format!("номер сторінки розміщено «{}»", a.replace('+', " + ")),
-                    "Ставити праворуч у верхньому куті",
+                    "лічильник виносок не скидається на кожній сторінці",
+                    "Нумерувати в межах сторінки: `set page(background: counter(footnote).update(0))`",
                 ),
                 None,
                 (0, ""),
                 None,
             );
         }
-        if let Some(Fact::Known(Some(n), why)) = &look.title {
-            c.add(
-                "page-number",
-                &why.at,
-                with_help(
-                    format!("на титульному аркуші проставлено номер «{n}»"),
-                    "Прибрати номер з титульного аркуша",
-                )
-                .assuming(&work.title_page, TITLE_PAGE),
-                Some("7.3.3"),
-                (0, ""),
-                None,
-            );
+        for (idx, look) in work.pages.iter().enumerate() {
+            let body_at = look.body.at();
+            match look.body.known() {
+                Some(None) => c.add(
+                    "page-number",
+                    body_at.unwrap(),
+                    with_help(
+                        "сторінки не пронумеровано",
+                        "Пронумерувати: `set page(numbering: \"1\", number-align: top + right)`",
+                    ),
+                    None,
+                    (0, ""),
+                    None,
+                ),
+                Some(Some(n)) if !n.chars().all(|ch| ch.is_ascii_digit()) => c.add(
+                    "page-number",
+                    body_at.unwrap(),
+                    with_help(
+                        format!("номер сторінки надруковано «{n}»"),
+                        "Друкувати арабськими цифрами без крапки",
+                    ),
+                    None,
+                    (0, ""),
+                    None,
+                ),
+                Some(Some(n)) if idx == 0 => {
+                    if look.first_page > 2 {
+                        c.add(
+                            "page-number",
+                            body_at.unwrap(),
+                            with_help(
+                                format!("сторінки 2–{} без номера", look.first_page - 1),
+                                "Не ставити номер лише на титульному аркуші",
+                            ),
+                            None,
+                            (0, ""),
+                            None,
+                        );
+                    }
+                    if n.parse::<i64>().is_ok_and(|n| n != look.first_page) {
+                        c.add(
+                            "page-number",
+                            body_at.unwrap(),
+                            with_help(
+                                format!("на с. {} надруковано номер {n}", look.first_page),
+                                THROUGH,
+                            ),
+                            None,
+                            (0, ""),
+                            None,
+                        );
+                    }
+                }
+                _ => {}
+            }
+            if matches!(look.body.known(), Some(Some(_)))
+                && let Fact::Known(a, why) = &look.align
+                && !((a.contains("right") || a.contains("end")) && a.contains("top"))
+            {
+                c.add(
+                    "page-number",
+                    &why.at,
+                    with_help(
+                        format!("номер сторінки розміщено «{}»", a.replace('+', " + ")),
+                        "Ставити праворуч у верхньому куті",
+                    ),
+                    None,
+                    (0, ""),
+                    None,
+                );
+            }
+            if let Some(Fact::Known(Some(n), why)) = &look.title {
+                c.add(
+                    "page-number",
+                    &why.at,
+                    with_help(
+                        format!("на титульному аркуші проставлено номер «{n}»"),
+                        "Прибрати номер з титульного аркуша",
+                    )
+                    .assuming(&work.title_page, TITLE_PAGE),
+                    Some("7.3.3"),
+                    (0, ""),
+                    None,
+                );
+            }
         }
     }
 

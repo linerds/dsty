@@ -1,36 +1,42 @@
 // dsty: проби повної перевірки. Обгортку подають typst через stdin, у
 // проєкт нічого не пишеться. Проби не змінюють розкладки: вони додають лише
-// невидимі `metadata` і колір тексту, а колір на розміщення не впливає.
+// невидимі `metadata` і синтетичну OpenType-ознаку `dtyk` у `text.features`,
+// яку шрифти ігнорують і якої не перекриває `set text(fill: black)` у шаблонах.
 //
 // Позицій і сторінок проби не читають: `here().position()` на кожному прогоні
 // тексту змушує typst робити ще один прохід розкладки й подвоює час. Їх бере
 // вираз `typst eval` уже після компіляції (`location().position()`).
 //
-// Вид вмісту позначається кольором тексту через show-set-правила: вони діють
-// і тоді, коли шаблон перебудовує елемент власним show-правилом без `it`.
+// Вид вмісту позначається `text(features: (dtyk: N))` через show-set-правила:
+// вони діють і тоді, коли шаблон перебудовує елемент власним show-правилом
+// без `it`, і не стираються правилами `set text(fill: …)`.
 //
 // Секції `// @секція` … `// @end` dsty вирізає, якщо їхні дані не
 // потрібні жодному ввімкненому правилу.
 
 #let dsty-kinds = (
-  "#010001": "h", // заголовок 2-го рівня й нижче
-  "#01000d": "H", // заголовок 1-го рівня
-  "#010002": "c", // підпис фігури
-  "#010003": "f", // вміст фігури, напис «Продовження таблиці»
-  "#010004": "t", // комірки таблиці
-  "#010005": "n", // текст виноски
-  "#010006": "o", // зміст
-  "#010007": "e", // виокремлена формула, її номер
-  "#010008": "r", // код
-  "#010009": "b", // перелік джерел
-  "#01000a": "l", // перелік
-  "#01000b": "s", // знак виноски, індекси, формула в рядку
-  "#01000e": "z", // надруковане посилання на джерело (`cite`)
+  "1": "h",  // заголовок 2-го рівня й нижче
+  "13": "H", // заголовок 1-го рівня
+  "2": "c",  // підпис фігури
+  "3": "f",  // вміст фігури, напис «Продовження таблиці»
+  "4": "t",  // комірки таблиці
+  "5": "n",  // текст виноски
+  "6": "o",  // зміст
+  "7": "e",  // виокремлена формула, її номер
+  "8": "r",  // код
+  "9": "b",  // перелік джерел
+  "10": "l", // перелік
+  "11": "s", // знак виноски, індекси, формула в рядку
+  "14": "z", // надруковане посилання на джерело (`cite`)
 )
 
 #let dsty-kind() = {
-  let f = text.fill
-  if type(f) == color { dsty-kinds.at(f.to-hex(), default: "") } else { "?" }
+  let f = text.features
+  if type(f) == dictionary {
+    dsty-kinds.at(str(f.at("dtyk", default: 0)), default: "")
+  } else {
+    ""
+  }
 }
 
 #let dsty-num(v) = if type(v) == length { v.to-absolute().pt() } else if type(v) == relative {
@@ -59,29 +65,29 @@
 }
 
 // @marks
-#show heading: set text(fill: rgb("#010001"))
-#show heading.where(level: 1): set text(fill: rgb("#01000d"))
-#show figure: set text(fill: rgb("#010003"))
-#show figure.caption: set text(fill: rgb("#010002"))
-#show table: set text(fill: rgb("#010004"))
-#show footnote.entry: set text(fill: rgb("#010005"))
-#show outline: set text(fill: rgb("#010006"))
-#show math.equation.where(block: true): set text(fill: rgb("#010007"))
-#show math.equation.where(block: false): set text(fill: rgb("#01000b"))
-#show raw: set text(fill: rgb("#010008"))
-#show bibliography: set text(fill: rgb("#010009"))
-#show list: set text(fill: rgb("#01000a"))
-#show enum: set text(fill: rgb("#01000a"))
-#show footnote: set text(fill: rgb("#01000b"))
-#show super: set text(fill: rgb("#01000b"))
-#show sub: set text(fill: rgb("#01000b"))
-#show cite: set text(fill: rgb("#01000e"))
+#show heading: set text(features: (dtyk: 1))
+#show heading.where(level: 1): set text(features: (dtyk: 13))
+#show figure: set text(features: (dtyk: 3))
+#show figure.caption: set text(features: (dtyk: 2))
+#show table: set text(features: (dtyk: 4))
+#show footnote.entry: set text(features: (dtyk: 5))
+#show outline: set text(features: (dtyk: 6))
+#show math.equation.where(block: true): set text(features: (dtyk: 7))
+#show math.equation.where(block: false): set text(features: (dtyk: 11))
+#show raw: set text(features: (dtyk: 8))
+#show bibliography: set text(features: (dtyk: 9))
+#show list: set text(features: (dtyk: 10))
+#show enum: set text(features: (dtyk: 10))
+#show footnote: set text(features: (dtyk: 11))
+#show super: set text(features: (dtyk: 11))
+#show sub: set text(features: (dtyk: 11))
+#show cite: set text(features: (dtyk: 14))
 // @end
 
 // @text
 // Прогони тексту записуються по одному лише там, де їх так і перевіряють:
 // заголовки, зміст, підписи, номери формул і посилань на джерела. Вид відомий з
-// кольору-позначки, тож `show text.where(fill: …)` основного тексту не чіпає:
+// ознаки `dtyk`, тож `show text.where(features: …)` основного тексту не чіпає:
 // правило на кожному слові абзацу коштує найбільше в усій обгортці. В
 // основному тексті записуються лише збіги ключових слів.
 
@@ -103,27 +109,27 @@
   }
 }
 
-#show text.where(fill: rgb("#010001")): it => { dsty-run(it, "h"); it }
-#show text.where(fill: rgb("#01000d")): it => { dsty-run(it, "H"); it }
+#show text.where(features: (dtyk: 1)): it => { dsty-run(it, "h"); it }
+#show text.where(features: (dtyk: 13)): it => { dsty-run(it, "H"); it }
 // Зміст: вміст сторінки після його заголовка (`heading-orphan`)
-#show text.where(fill: rgb("#010006")): it => { dsty-run(it, "o"); it }
-#show text.where(fill: rgb("#010002")): it => { dsty-run(it, "c"); it }
+#show text.where(features: (dtyk: 6)): it => { dsty-run(it, "o"); it }
+#show text.where(features: (dtyk: 2)): it => { dsty-run(it, "c"); it }
 // Надруковане посилання на джерело: номер стиль загортає в посилання, тож
 // «[», «2», «]» стають окремими прогонами, і їх збирає повна перевірка
-#show text.where(fill: rgb("#01000e")): it => { dsty-run(it, "z"); it }
+#show text.where(features: (dtyk: 14)): it => { dsty-run(it, "z"); it }
 // У формулі записується лише номер: прогін з дужками. Числа й рядки тіла формули (їх
 // сотні) не записуються, а номер без дужок видно з шаблону нумерації.
-#show text.where(fill: rgb("#010007")): it => {
+#show text.where(features: (dtyk: 7)): it => {
   if it.text.contains("(") or it.text.contains(")") { dsty-run(it, "e") }
   it
 }
 
 // Обсяг звіту в рефераті й напис «Продовження таблиці»: запис збігу в
-// основному тексті, таблиці й фігурі
-#show regex("^\s*(Продовження|Кінець)|\d+\s*(?:с|стор|рис|табл|дод|джерел|посил)\p{L}*\.?"): it => {
+// основному тексті, переліку, таблиці й фігурі
+#show regex("^\s*(Продовження|Кінець)(?:\s+табл\p{L}*\.?(?:\s+[\dА-ЯҐЄІЇA-Z]+(?:\.\d+)*)?)?|\d+\s*(?:с|стор|рис|табл|дод|джерел|посил)\p{L}*\.?"): it => {
   context {
     let k = dsty-kind()
-    if k in ("", "t", "f") { [#metadata((k: "run", kind: k, t: it.text))<dsty-probe>] }
+    if k in ("", "t", "f", "l") { [#metadata((k: "run", kind: k, t: it.text))<dsty-probe>] }
   }
   it
 }

@@ -21,7 +21,7 @@ use crate::text::Loc;
 use crate::text::Text;
 use crate::work::{
     At, Basis, Counts, Element, Equation, Fact, Figure, FigureKind, FigurePrint, Heading,
-    HeadingPrint, Label, List, Par, Table, TableSplit, Work,
+    HeadingPrint, Label, List, Paper, Par, Table, TableSplit, Work,
 };
 
 static NUMBER_RUN: LazyLock<Regex> =
@@ -44,9 +44,51 @@ pub fn lay_out(work: &mut Work, code: &Code, facts: &Facts) {
     out.apply(work, code);
 }
 
-/// Титульний аркуш: з коду це все до першого заголовка, а розкладка каже,
-/// чи перший заголовок справді не на першій сторінці.
+/// Титульний аркуш і невідомі статиці налаштування сторінки: з коду титульний
+/// аркуш — усе до першого заголовка, а розкладка каже напевно; так само на
+/// непрозорому шаблоні розкладка підставляє формат і береги (`Basis::Layout`),
+/// щоб їх перевірили ті самі статичні правила без дублювання.
 pub fn confirm(work: &mut Work, facts: &Facts) {
+    // Формат і береги сторінки для непрозорих шаблонів (де жоден елемент не
+    // має відомого з коду формату чи берегів, щоб не дублювати відоме з коду)
+    let has_code_paper = work
+        .looks
+        .iter()
+        .any(|l| l.paper.basis() == Some(Basis::Code));
+    let has_code_margins = work
+        .looks
+        .iter()
+        .any(|l| l.margins.iter().any(|m| m.basis() == Some(Basis::Code)));
+    if (!has_code_paper || !has_code_margins)
+        && let Some(page) = facts.entries.iter().find_map(|e| match &e.item {
+            Item::Page(p) => Some(p),
+            _ => None,
+        })
+    {
+        let (t, r, b, l) = page.margins();
+        let m_vals = [t, r, b, l];
+        for look in &mut work.looks {
+            if !has_code_paper && look.paper.known().is_none() {
+                look.paper = Fact::new(
+                    Paper {
+                        name: None,
+                        w: Some(page.w),
+                        h: Some(page.h),
+                    },
+                    Basis::Layout,
+                    At::default("page", &["paper", "width", "height", "flipped"]),
+                );
+            }
+            if !has_code_margins {
+                for (slot, val) in look.margins.iter_mut().zip(m_vals) {
+                    if slot.known().is_none() {
+                        *slot = Fact::new(val, Basis::Layout, At::default("page", &["margin"]));
+                    }
+                }
+            }
+        }
+    }
+
     let Some(k) = work.first_heading() else {
         return;
     };
@@ -61,10 +103,10 @@ pub fn confirm(work: &mut Work, facts: &Facts) {
     };
     let title_page = if page > 1 { k } else { 0 };
     work.title_page = laid(title_page, &h.loc);
-    if title_page == 0
-        && let Some(pages) = &mut work.pages
-    {
-        pages.title = None;
+    if title_page == 0 {
+        for pages in &mut work.pages {
+            pages.title = None;
+        }
     }
 }
 
@@ -280,25 +322,126 @@ fn norm(s: &str) -> String {
         .collect()
 }
 
-/// Зіставляє елементи потоку з елементами моделі: спершу за однаковими
-/// ключами в тому самому порядку, потім у проміжках між зіставленими за
-/// порядком, якщо в них порівну елементів. `None` у ключі означає, що ключа немає.
+/// Зіставляє елементи потоку з елементами моделі через найдовшу спільну
+/// підпослідовність (LCS) непустих ключів, а в проміжках між зіставленими
+/// якорями — за порядком, якщо в них порівну елементів. `None` або порожній
+/// ключ у LCS не збігається.
 fn align(stream: &[Option<String>], model: &[Option<String>]) -> Vec<Option<usize>> {
     let mut out = vec![None; stream.len()];
     let mut used = vec![false; model.len()];
-    let mut cursor = 0;
-    for (i, key) in stream.iter().enumerate() {
-        let Some(key) = key else { continue };
-        if key.is_empty() {
-            continue;
+    let matches = |i: usize, j: usize| -> bool {
+        match (&stream[i], &model[j]) {
+            (Some(a), Some(b)) if !a.is_empty() => a == b,
+            _ => false,
         }
-        if let Some(j) = (cursor..model.len()).find(|&j| !used[j] && model[j].as_ref() == Some(key))
-        {
-            out[i] = Some(j);
-            used[j] = true;
-            cursor = j + 1;
+    };
+
+    // Фільтруємо до позицій з непустими ключами: LCS по них менший і швидший
+    let s_idx: Vec<usize> = stream
+        .iter()
+        .enumerate()
+        .filter_map(|(i, k)| k.as_deref().filter(|s| !s.is_empty()).map(|_| i))
+        .collect();
+    let m_idx: Vec<usize> = model
+        .iter()
+        .enumerate()
+        .filter_map(|(j, k)| k.as_deref().filter(|s| !s.is_empty()).map(|_| j))
+        .collect();
+
+    // Зрізаємо спільний префікс і суфікс
+    let mut pre = 0;
+    while pre < s_idx.len() && pre < m_idx.len() && matches(s_idx[pre], m_idx[pre]) {
+        out[s_idx[pre]] = Some(m_idx[pre]);
+        used[m_idx[pre]] = true;
+        pre += 1;
+    }
+    let mut s_end = s_idx.len();
+    let mut m_end = m_idx.len();
+    while s_end > pre && m_end > pre && matches(s_idx[s_end - 1], m_idx[m_end - 1]) {
+        s_end -= 1;
+        m_end -= 1;
+        out[s_idx[s_end]] = Some(m_idx[m_end]);
+        used[m_idx[m_end]] = true;
+    }
+
+    let sa = &s_idx[pre..s_end];
+    let mb = &m_idx[pre..m_end];
+    let (n, m) = (sa.len(), mb.len());
+    if n > 0 && m > 0 {
+        if n * m <= 250_000 {
+            let stride = m + 1;
+            let mut dp = vec![0u32; (n + 1) * stride];
+            for i in (0..n).rev() {
+                for j in (0..m).rev() {
+                    dp[i * stride + j] = if matches(sa[i], mb[j]) {
+                        dp[(i + 1) * stride + j + 1] + 1
+                    } else {
+                        dp[(i + 1) * stride + j].max(dp[i * stride + j + 1])
+                    };
+                }
+            }
+            let (mut i, mut j) = (0, 0);
+            while i < n && j < m {
+                if matches(sa[i], mb[j]) {
+                    out[sa[i]] = Some(mb[j]);
+                    used[mb[j]] = true;
+                    i += 1;
+                    j += 1;
+                } else if dp[(i + 1) * stride + j] >= dp[i * stride + j + 1] {
+                    i += 1;
+                } else {
+                    j += 1;
+                }
+            }
+        } else {
+            // Смуговий LCS для дуже великих документів (тисячі абзаців)
+            let band = n.abs_diff(m) + 64;
+            let width = 2 * band + 1;
+            let mut dp = vec![0u32; (n + 1) * width];
+            let at = |i: usize, j: usize| -> Option<usize> {
+                let d = j as isize - i as isize;
+                if d.unsigned_abs() <= band {
+                    Some(i * width + (d + band as isize) as usize)
+                } else {
+                    None
+                }
+            };
+            let get = |dp: &[u32], i: usize, j: usize| -> u32 {
+                if i >= n || j >= m {
+                    return 0;
+                }
+                at(i, j).map_or(0, |k| dp[k])
+            };
+            for i in (0..n).rev() {
+                let j_lo = i.saturating_sub(band);
+                let j_hi = (i + band + 1).min(m);
+                for j in (j_lo..j_hi).rev() {
+                    let val = if matches(sa[i], mb[j]) {
+                        get(&dp, i + 1, j + 1) + 1
+                    } else {
+                        get(&dp, i + 1, j).max(get(&dp, i, j + 1))
+                    };
+                    if let Some(k) = at(i, j) {
+                        dp[k] = val;
+                    }
+                }
+            }
+            let (mut i, mut j) = (0, 0);
+            while i < n && j < m {
+                if matches(sa[i], mb[j]) {
+                    out[sa[i]] = Some(mb[j]);
+                    used[mb[j]] = true;
+                    i += 1;
+                    j += 1;
+                } else if get(&dp, i + 1, j) >= get(&dp, i, j + 1) {
+                    i += 1;
+                } else {
+                    j += 1;
+                }
+            }
         }
     }
+
     // Проміжки між зіставленими
     let mut i = 0;
     let mut model_from = 0;
@@ -558,9 +701,21 @@ impl<'a> Checker<'a> {
 
     fn map_footnotes(&mut self) {
         let stream = self.indices(|i| matches!(i, Item::Footnote { again: false, .. }));
-        if stream.len() == self.work.footnotes.at.len() {
-            for (k, &i) in stream.iter().enumerate() {
-                self.locs[i] = Some(self.work.footnotes.at[k].clone());
+        let key = |s: &str| {
+            let n: String = norm(s).chars().take(24).collect();
+            (n.chars().count() >= 4).then_some(n)
+        };
+        let skeys: Vec<_> = stream
+            .iter()
+            .map(|&i| match &self.e[i].item {
+                Item::Footnote { head: Some(h), .. } => key(h),
+                _ => None,
+            })
+            .collect();
+        let mkeys: Vec<_> = self.work.footnotes.heads.iter().map(|h| key(h)).collect();
+        for (k, m) in align(&skeys, &mkeys).into_iter().enumerate() {
+            if let Some(m) = m {
+                self.locs[stream[k]] = Some(self.work.footnotes.at[m].clone());
             }
         }
     }
@@ -612,11 +767,26 @@ impl<'a> Checker<'a> {
                 _ => None,
             })
             .collect();
-        let stream = self.indices(|i| matches!(i, Item::List | Item::Enum));
-        if stream.len() == model.len() {
-            for (k, &i) in stream.iter().enumerate() {
-                self.locs[i] = model[k].1.items.first().map(|it| it.loc.clone());
-                self.elem_of[i] = Some(model[k].0);
+        let stream = self.indices(|i| matches!(i, Item::List { .. } | Item::Enum { .. }));
+        let key = |s: &str| {
+            let n: String = norm(s).chars().take(24).collect();
+            (n.chars().count() >= 4).then_some(n)
+        };
+        let skeys: Vec<_> = stream
+            .iter()
+            .map(|&i| match &self.e[i].item {
+                Item::List { head } | Item::Enum { head } => key(head),
+                _ => None,
+            })
+            .collect();
+        let mkeys: Vec<_> = model
+            .iter()
+            .map(|(_, l)| l.items.first().and_then(|it| key(it.text.as_str())))
+            .collect();
+        for (k, m) in align(&skeys, &mkeys).into_iter().enumerate() {
+            if let Some(m) = m {
+                self.locs[stream[k]] = model[m].1.items.first().map(|it| it.loc.clone());
+                self.elem_of[stream[k]] = Some(model[m].0);
             }
         }
     }
@@ -708,8 +878,10 @@ impl<'a> Checker<'a> {
             | Item::Figure { .. }
             | Item::Equation { .. }
             | Item::Table { .. }
-            | Item::List
-            | Item::Enum => true,
+            | Item::List { .. }
+            | Item::Enum { .. }
+            | Item::Raw
+            | Item::Image => true,
             _ => false,
         }
     }
@@ -882,14 +1054,46 @@ impl<'a> Checker<'a> {
                 } => Some(c.clone()),
                 _ => None,
             };
+            // Номер таблиці (якщо відомий з моделі): для перевірки відповідності
+            // напису «Продовження таблиці N»
+            let table_num = self.elem_of[owner].and_then(|k| match &self.work.elements[k] {
+                Element::Figure(f) => f.number.known().map(|s| s.trim().to_owned()),
+                _ => None,
+            });
             let unmarked: Vec<usize> = (from + 1..=to)
                 .filter(|&pg| {
-                    !self.e.iter().any(|x| {
-                        x.pg == pg
-                            && matches!(&x.item, Item::Run(r) if {
-                                let t = r.t.trim_start();
-                                t.starts_with("Продовження") || t.starts_with("Кінець")
-                            })
+                    let top_margin = self.page(pg).map_or(56.7, |p| p.margins().0);
+                    let slice_bottom = (pg == to).then_some(self.e[end].y);
+                    !self.e.iter().enumerate().any(|(j, x)| {
+                        if x.pg != pg {
+                            return false;
+                        }
+                        let Item::Run(r) = &x.item else {
+                            return false;
+                        };
+                        let t = r.t.trim_start();
+                        if !(t.starts_with("Продовження") || t.starts_with("Кінець"))
+                        {
+                            return false;
+                        }
+                        // Напис має стояти над перенесеною частиною таблиці (у її
+                        // головці/фігурі або вгорі сторінки над нею), а не в
+                        // тексті нижче за таблицю
+                        let inside_table =
+                            j > start && j < end && matches!(r.kind.as_str(), "t" | "f");
+                        let above_slice =
+                            slice_bottom.is_none_or(|b| x.y <= b + 2.0) && x.y <= top_margin + 60.0;
+                        if !(inside_table || above_slice) {
+                            return false;
+                        }
+                        // Якщо в написі зазначено номер таблиці і ми знаємо номер
+                        // цієї таблиці, вони мають збігатися
+                        if let (Some(want), Some(found)) = (&table_num, continuation_number(t))
+                            && !want.eq_ignore_ascii_case(found)
+                        {
+                            return false;
+                        }
+                        true
                     })
                 })
                 .collect();
@@ -1013,7 +1217,9 @@ impl<'a> Checker<'a> {
             let end = next.unwrap_or(self.e.len());
             let text: String = (a..end)
                 .filter_map(|j| match &self.e[j].item {
-                    Item::Run(r) if r.kind.is_empty() => Some(r.t.as_str()),
+                    Item::Run(r) if r.kind.is_empty() || r.kind == "l" || r.kind == "t" => {
+                        Some(r.t.as_str())
+                    }
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -1081,6 +1287,18 @@ impl<'a> Checker<'a> {
     }
 }
 
+/// Номер таблиці в написі «Продовження таблиці 2.1» / «Кінець табл. А.1».
+fn continuation_number(t: &str) -> Option<&str> {
+    let mut parts = t.split_whitespace();
+    let _first = parts.next()?;
+    let second = parts.next()?;
+    if !second.to_lowercase().starts_with("табл") {
+        return None;
+    }
+    let num = parts.next()?.trim_end_matches('.');
+    (!num.is_empty()).then_some(num)
+}
+
 /// Номер заголовка: «1», «1.2», «А.1» (буква лише з номером після неї).
 fn is_heading_number(t: &str) -> bool {
     NUMBER_RUN.captures(t).is_some_and(|c| {
@@ -1099,6 +1317,19 @@ mod tests {
         let stream = s(&[Some("a"), None, Some("c"), Some("x")]);
         let model = s(&[Some("a"), Some("b"), Some("c")]);
         assert_eq!(align(&stream, &model), [Some(0), Some(1), Some(2), None]);
+    }
+
+    #[test]
+    fn lcs_align_survives_repeated_template_entry() {
+        let s = |v: &[Option<&str>]| v.iter().map(|x| x.map(str::to_owned)).collect::<Vec<_>>();
+        // Шаблон вставляє повторюваний заголовок "d" на початку: жадібний пошук
+        // стрибнув би на кінець і втратив би "a", "b", "c", а LCS лишає їх на місці
+        let stream = s(&[Some("d"), Some("a"), Some("b"), Some("c"), Some("d")]);
+        let model = s(&[Some("a"), Some("b"), Some("c"), Some("d")]);
+        assert_eq!(
+            align(&stream, &model),
+            [None, Some(0), Some(1), Some(2), Some(3)]
+        );
     }
 
     #[test]

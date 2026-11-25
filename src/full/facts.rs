@@ -34,6 +34,8 @@ pub enum Item {
     },
     Footnote {
         again: bool,
+        #[serde(default)]
+        head: Option<String>,
     },
     Ref {
         target: String,
@@ -41,8 +43,16 @@ pub enum Item {
     Cite {
         key: String,
     },
-    List,
-    Enum,
+    List {
+        #[serde(default)]
+        head: String,
+    },
+    Enum {
+        #[serde(default)]
+        head: String,
+    },
+    Raw,
+    Image,
     /// Прогін тексту (лише вартий перевірки).
     Run(Run),
     /// Абзац: вид і початок тексту.

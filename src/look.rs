@@ -155,6 +155,8 @@ pub struct Rendered {
     pub reached: Option<Reached>,
     /// Що друкується перед текстом елемента (у порядку друку).
     pub before: Vec<Item>,
+    /// Що друкується після тексту елемента (у порядку друку).
+    pub after: Vec<Item>,
     /// Show-функція, що оформлює елемент (для зауважень).
     pub site: Option<Rc<crate::eval::ShowEffect>>,
 }
@@ -172,6 +174,7 @@ pub fn render(
         inner: Vec::new(),
         reached: Some(Reached::Builtin),
         before: Vec::new(),
+        after: Vec::new(),
         site: None,
     };
     // Show-set: усі, що діють, у порядку правил (пізніше переважає)
@@ -208,7 +211,14 @@ pub fn render(
         }
         let printed = ev.render(&f, sym.clone());
         let mut path = Vec::new();
-        match find(ev, &printed.items(), &sym, &mut path, &mut out.before) {
+        match find(
+            ev,
+            &printed.items(),
+            &sym,
+            &mut path,
+            &mut out.before,
+            &mut out.after,
+        ) {
             Some(Reached::Builtin) => out.inner.extend(path),
             Some(r) => {
                 out.inner.extend(path);
@@ -290,17 +300,19 @@ pub fn flatten(
 }
 
 /// Шукає елемент `sym` чи його текст у виводі show-функції: налаштування на
-/// шляху до нього йдуть у `path`, а все, що друкується раніше, у `before`.
+/// шляху до нього йдуть у `path`, усе перед ним — у `before`, усе після — у `after`.
 fn find(
     ev: &mut Evaluator,
     items: &[Item],
     sym: &Rc<Elem>,
     path: &mut Vec<Effect>,
     before: &mut Vec<Item>,
+    after: &mut Vec<Item>,
 ) -> Option<Reached> {
     let mut flat = Vec::new();
     flatten(ev, items, &mut Vec::new(), &mut flat);
-    for (item, at) in flat {
+    let mut iter = flat.into_iter();
+    while let Some((item, at)) = iter.next() {
         let reached = match &item {
             Item::Hole => Some(Reached::Hole),
             Item::Elem(e) if Rc::ptr_eq(e, sym) => Some(Reached::Builtin),
@@ -310,6 +322,7 @@ fn find(
         };
         if let Some(r) = reached {
             path.extend(at.iter().cloned());
+            after.extend(iter.map(|(it, _)| it));
             return Some(r);
         }
         before.push(item);
@@ -405,6 +418,40 @@ pub fn show_origin(
         span: typst_syntax::Span::detached(),
     };
     origin(&set, &arg)
+}
+
+/// Оформлення тексту під `_…_` (`emph`) з урахуванням `show emph`.
+pub fn emph(
+    ev: &mut Evaluator,
+    base: &Style,
+    origin: &dyn Fn(&SetEffect, &SetArg) -> Origin,
+) -> Style {
+    let node = Node::new("emph", Vec::new());
+    let rendered = render(ev, &base.chain, &node, &[], symbol("emph", Vec::new()));
+    let mut style = base.clone();
+    match rendered.reached {
+        Some(Reached::Builtin | Reached::Replaced(_)) => {
+            // Типова поведінка `emph`: перемикає курсив
+            let toggled = match base.italic.known() {
+                Some(&b) => Fact::typst(!b, At::default_in("emph", "text", &["style"])),
+                None => Fact::Unknown,
+            };
+            style.italic = toggled;
+            for e in &rendered.inner {
+                style.apply_effect(e, origin);
+            }
+        }
+        Some(Reached::Hole) => {
+            // `show emph: it => ... it.body ...`: вбудований курсив замінено
+            for e in &rendered.inner {
+                style.apply_effect(e, origin);
+            }
+        }
+        None => {
+            style.italic = Fact::Unknown;
+        }
+    }
+    style
 }
 
 /// Налаштування тексту в елементі `elem` (`outline.entry`) без вбудованого
@@ -518,7 +565,7 @@ pub fn pages(ev: &mut Evaluator, body: &Style, title: Option<&Style>) -> work::P
     };
     let title = title.map(|t| page_number(ev, &t.page_numbering, 1));
     // Лічильник виносок скидається на кожній сторінці (`background: counter(footnote).update(0)`)
-    let mut footnote_reset = Some(false);
+    let mut footnote_reset = Fact::typst(false, At::default("page", &["background"]));
     for name in ["background", "foreground", "header", "footer"] {
         match body
             .page_parts
@@ -534,14 +581,14 @@ pub fn pages(ev: &mut Evaluator, body: &Style, title: Option<&Style>) -> work::P
                     .iter()
                     .any(|(i, _)| matches!(i, Item::Count(k, Value::Int(0)) if k == "footnote"))
                 {
-                    footnote_reset = Some(true);
+                    footnote_reset = Fact::set(true, f.origin().unwrap().clone());
                     break;
                 }
                 if flat.iter().any(|(i, _)| matches!(i, Item::Unknown)) {
-                    footnote_reset = None;
+                    footnote_reset = Fact::Unknown;
                 }
             }
-            Some(Fact::Unknown) => footnote_reset = None,
+            Some(Fact::Unknown) => footnote_reset = Fact::Unknown,
             _ => {}
         }
     }
@@ -643,11 +690,15 @@ pub fn offset(before: &[Item]) -> Option<Length> {
 
 /// Вирівнювання (`set align(…)`, `align(…)[…]`) серед налаштувань `effects`.
 pub fn alignment(effects: &[Effect]) -> Option<Option<String>> {
+    alignment_set(effects).map(|o| o.map(|(a, _)| a))
+}
+
+fn alignment_set(effects: &[Effect]) -> Option<Option<(String, Rc<SetEffect>)>> {
     let mut out = None;
     for e in effects {
         match e {
             Effect::Set(s) if s.target == "align" => match s.arg("alignment").map(|a| &a.value) {
-                Some(Value::Align(a)) => out = Some(a.clone()),
+                Some(Value::Align(a)) => out = Some((a.clone(), s.clone())),
                 Some(_) => return None,
                 None => {}
             },
@@ -827,7 +878,10 @@ pub fn heading(
             ),
             None => Fact::Unknown,
         },
-        prefix,
+        prefix: match prefix {
+            Some(p) => Fact::new(p, Basis::Computed, block()),
+            None => Fact::Unknown,
+        },
         align: match &align {
             Some(a) => Fact::new(align_of(a), Basis::Computed, block()),
             None => Fact::Unknown,
@@ -859,6 +913,7 @@ struct CaptionLook {
     supplement: Fact<String>,
     separator: Fact<String>,
     top: Fact<bool>,
+    align: Fact<Align>,
     /// Нумерація фігур: шаблон, функція, `none`.
     numbering: Fact<Value>,
 }
@@ -946,6 +1001,7 @@ pub fn caption(
         supplement: look.supplement,
         separator: look.separator,
         top: look.top,
+        align: look.align,
         numbering: numbered(ev, &look.numbering, || {
             At::default("figure", &["numbering"])
         }),
@@ -1025,6 +1081,7 @@ fn caption_parts(
         supplement,
         separator,
         top,
+        align: Fact::Unknown,
         numbering,
     };
     let numbering_value = look.numbering.known().cloned().unwrap_or(Value::Unknown);
@@ -1102,6 +1159,16 @@ fn caption_parts(
         cap_fields(Value::Content(Rc::new(vec![Item::Hole]))),
     );
     let r = render(ev, &chain, &cap, std::slice::from_ref(&fig), sym);
+    look.align = match (&r.reached, alignment_set(&r.inner)) {
+        (Some(_), Some(Some((a, s)))) => Fact::set(align_of(&Some(a)), origin(&s, "alignment")),
+        (Some(Reached::Builtin | Reached::Replaced(_)), Some(None)) if parts.builtin => {
+            Fact::typst(
+                Align::Center,
+                At::default_in("figure.caption", "align", &[]),
+            )
+        }
+        _ => Fact::Unknown,
+    };
     match &r.reached {
         Some(Reached::Builtin | Reached::Replaced(_)) => {
             if r.before.iter().any(|i| {
@@ -1217,10 +1284,48 @@ pub fn equation(
             None => Fact::Unknown,
         };
     }
-    let align = match (&r.reached, alignment(&r.inner)) {
-        (Some(_), Some(Some(a))) => Some(a),
-        (Some(Reached::Builtin | Reached::Replaced(_)), Some(None)) => Some("center".into()),
-        _ => None,
+    let align = match (&r.reached, alignment_set(&r.inner)) {
+        (Some(_), Some(Some((a, s)))) => Fact::set(a, origin(&s, "alignment")),
+        (Some(Reached::Builtin | Reached::Replaced(_)), Some(None)) => Fact::typst(
+            "center".into(),
+            At::default_in("math.equation", "align", &[]),
+        ),
+        _ => Fact::Unknown,
+    };
+    let eq_at = || {
+        r.site
+            .as_ref()
+            .map(|sh| {
+                At::Rule(origin(
+                    &Rc::new(SetEffect {
+                        target: "math.equation".into(),
+                        args: Vec::new(),
+                        open: false,
+                        path: sh.path.clone(),
+                        span: sh.span,
+                    }),
+                    "",
+                ))
+            })
+            .unwrap_or_else(|| At::default("math.equation", &["numbering"]))
+    };
+    let rendered_number = match &r.reached {
+        Some(Reached::Builtin | Reached::Replaced(_)) => match numbering.known() {
+            Some(Value::None) => Fact::new(false, Basis::Computed, eq_at()),
+            Some(_) => Fact::new(true, Basis::Computed, eq_at()),
+            None => Fact::Unknown,
+        },
+        Some(Reached::Hole) => {
+            let around = r.before.iter().chain(&r.after);
+            if around.clone().any(|i| matches!(i, Item::Number)) {
+                Fact::new(true, Basis::Computed, eq_at())
+            } else if around.clone().any(|i| matches!(i, Item::Unknown)) {
+                Fact::Unknown
+            } else {
+                Fact::new(false, Basis::Computed, eq_at())
+            }
+        }
+        None => Fact::Unknown,
     };
     let look = work::EquationLook {
         numbering: numbered(ev, &numbering, || {
@@ -1228,6 +1333,7 @@ pub fn equation(
         }),
         number_align: number_align.placed(|| At::default("math.equation", &["number-align"])),
         align,
+        rendered_number,
     };
     (look, numbering)
 }

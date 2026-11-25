@@ -389,6 +389,9 @@ pub enum Callee {
 struct Env {
     file: usize,
     locals: Vec<(String, Value)>,
+    /// Якщо задано, видимі лише верхньорівневі `let`/`import`, що закінчилися
+    /// не пізніше цього байта (щоб раніші вирази не бачили пізніших перевизначень).
+    limit: Option<usize>,
 }
 
 #[derive(PartialEq)]
@@ -405,6 +408,8 @@ struct File {
     root: PathBuf,
     state: State,
     bindings: HashMap<String, Value>,
+    /// Верхньорівневі прив'язки в порядку появи: (кінцевий байт вузла, назва, значення).
+    top_bindings: Vec<(usize, String, Value)>,
 }
 
 /// Розібрані файли пакунків: між перевірками (у LSP на кожну зміну) вони не
@@ -501,6 +506,7 @@ impl<'a> Evaluator<'a> {
             root,
             state: State::Fresh,
             bindings: HashMap::new(),
+            top_bindings: Vec::new(),
         });
         let id = self.files.len() - 1;
         self.by_path.insert(path, id);
@@ -529,7 +535,7 @@ impl<'a> Evaluator<'a> {
         true
     }
 
-    fn env_of(&mut self, path: &Path) -> Option<Env> {
+    fn env_of(&mut self, path: &Path, node: &SyntaxNode) -> Option<Env> {
         let root = self.root.clone();
         let file = self.file_id(path, &root)?;
         self.ensure_module(file);
@@ -539,14 +545,23 @@ impl<'a> Evaluator<'a> {
             .filter(|(f, _, _)| *f == file)
             .map(|(_, n, v)| (n.clone(), v.clone()))
             .collect();
-        Some(Env { file, locals })
+        let limit = self.files[file]
+            .source
+            .find(node.span())
+            .filter(|n| n.get() == node)
+            .map(|n| n.range().start);
+        Some(Env {
+            file,
+            locals,
+            limit,
+        })
     }
 
     // --- Відкриті методи для моделі ----------------------------------------------
 
     /// Значення виразу з файлу `path` (у його області видимості верхнього рівня).
     pub fn eval_in(&mut self, path: &Path, expr: Expr) -> Value {
-        match self.env_of(path) {
+        match self.env_of(path, expr.to_untyped()) {
             Some(mut env) => self.eval(expr, &mut env),
             None => Value::Unknown,
         }
@@ -554,7 +569,7 @@ impl<'a> Evaluator<'a> {
 
     /// Що викликає `call` у файлі `path`.
     pub fn callee_in(&mut self, path: &Path, call: ast::FuncCall) -> Callee {
-        let Some(mut env) = self.env_of(path) else {
+        let Some(mut env) = self.env_of(path, call.to_untyped()) else {
             return Callee::Unknown;
         };
         let value = match self.callee(call.callee(), call.args(), &mut env, false) {
@@ -573,7 +588,7 @@ impl<'a> Evaluator<'a> {
     /// Вираз документа з файлу `path`: виклики обчислюються, а вміст документа
     /// в аргументах лишається посиланням на код ([`Item::Source`]).
     pub fn eval_doc_in(&mut self, path: &Path, expr: Expr) -> Value {
-        match self.env_of(path) {
+        match self.env_of(path, expr.to_untyped()) {
             Some(mut env) => self.eval_doc(expr, &mut env),
             None => Value::Unknown,
         }
@@ -582,7 +597,7 @@ impl<'a> Evaluator<'a> {
     /// `#show: transform` у файлі `path`: вміст, у якому решта документа
     /// стоїть як [`Item::Body`].
     pub fn show_in(&mut self, path: &Path, transform: Expr) -> Value {
-        let Some(mut env) = self.env_of(path) else {
+        let Some(mut env) = self.env_of(path, transform.to_untyped()) else {
             return Value::Unknown;
         };
         let func = self.eval_doc(transform, &mut env);
@@ -613,6 +628,7 @@ impl<'a> Evaluator<'a> {
                     let mut env = Env {
                         file: d.file,
                         locals: d.captured.to_vec(),
+                        limit: None,
                     };
                     self.resolving += 1;
                     let saved = self.ret.take();
@@ -649,7 +665,7 @@ impl<'a> Evaluator<'a> {
 
     /// `show селектор: …` у файлі `path` як налаштування елемента.
     pub fn show_effect_in(&mut self, path: &Path, show: ast::ShowRule) -> Option<Effect> {
-        let mut env = self.env_of(path)?;
+        let mut env = self.env_of(path, show.to_untyped())?;
         self.show_effect(show, &mut env)
     }
 
@@ -688,7 +704,7 @@ impl<'a> Evaluator<'a> {
 
     /// `set`-правило у файлі `path` як налаштування.
     pub fn set_in(&mut self, path: &Path, set: ast::SetRule) -> Option<Rc<SetEffect>> {
-        let mut env = self.env_of(path)?;
+        let mut env = self.env_of(path, set.to_untyped())?;
         match self.set_effect(set, &mut env)? {
             Effect::Set(s) => Some(s),
             _ => None,
@@ -704,7 +720,7 @@ impl<'a> Evaluator<'a> {
     /// Вбудований `text(…)[…]` чи `par(…)[…]` у файлі `path` як налаштування
     /// для свого вмісту.
     pub fn call_set_in(&mut self, path: &Path, call: ast::FuncCall) -> Option<Rc<SetEffect>> {
-        let mut env = self.env_of(path)?;
+        let mut env = self.env_of(path, call.to_untyped())?;
         let target = path_of(call.callee())?;
         let mut args = Vec::new();
         let mut open = false;
@@ -742,12 +758,14 @@ impl<'a> Evaluator<'a> {
         let mut env = Env {
             file,
             locals: Vec::new(),
+            limit: None,
         };
         // Вміст, набраний у значеннях верхнього рівня файлу проєкту (`#let
         // назва = […]`), пам'ятає свій код ([`Written`])
         let project = self.files[file].root == self.root;
         if let Some(markup) = source.root().cast::<ast::Markup>() {
             for expr in markup.exprs() {
+                let end = source.find(expr.span()).map_or(0, |n| n.range().end);
                 let bound = match expr {
                     Expr::LetBinding(l) => {
                         let saved = self.written.take();
@@ -762,6 +780,9 @@ impl<'a> Evaluator<'a> {
                     _ => continue,
                 };
                 for (name, value) in bound {
+                    self.files[file]
+                        .top_bindings
+                        .push((end, name.clone(), value.clone()));
                     self.files[file].bindings.insert(name, value);
                 }
             }
@@ -920,7 +941,16 @@ impl<'a> Evaluator<'a> {
         if let Some((_, v)) = env.locals.iter().rev().find(|(n, _)| n == name) {
             return v.clone();
         }
-        if let Some(v) = self.files[env.file].bindings.get(name) {
+        if let Some(limit) = env.limit {
+            if let Some((_, _, v)) = self.files[env.file]
+                .top_bindings
+                .iter()
+                .rev()
+                .find(|(end, n, _)| *end <= limit && n == name)
+            {
+                return v.clone();
+            }
+        } else if let Some(v) = self.files[env.file].bindings.get(name) {
             return v.clone();
         }
         if is_builtin(name) {
@@ -1568,6 +1598,7 @@ impl<'a> Evaluator<'a> {
         let mut env = Env {
             file,
             locals: captured.to_vec(),
+            limit: None,
         };
         self.ensure_module(file);
         let mut pos = args.pos.into_iter();
@@ -2605,21 +2636,37 @@ fn black(name: &str, args: &Args) -> Option<bool> {
     match (name, args.pos.first()) {
         ("rgb", Some(Value::Str(hex))) => {
             let hex = hex.trim_start_matches('#');
-            let digits = if hex.len() == 4 || hex.len() == 8 {
-                &hex[..hex.len() * 3 / 4]
-            } else {
-                hex
-            };
-            if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+            if !matches!(hex.len(), 3 | 4 | 6 | 8) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return None;
             }
-            Some(digits.chars().all(|c| c == '0'))
+            let (rgb, alpha) = if hex.len() == 4 || hex.len() == 8 {
+                hex.split_at(hex.len() * 3 / 4)
+            } else {
+                (hex, "")
+            };
+            if !alpha.is_empty() && alpha.bytes().all(|b| b == b'0') {
+                return Some(false);
+            }
+            Some(rgb.bytes().all(|b| b == b'0'))
         }
         ("rgb", _) => {
             let v = ints?;
-            (v.len() >= 3).then(|| v[..3].iter().all(|&c| c == 0.0))
+            if v.len() < 3 {
+                return None;
+            }
+            if v.get(3).is_some_and(|&a| a <= 0.0) {
+                return Some(false);
+            }
+            Some(v[..3].iter().all(|&c| c == 0.0))
         }
-        _ => Some(ints?.first()? == &0.0),
+        _ => {
+            let v = ints?;
+            let lum = *v.first()?;
+            if v.get(1).is_some_and(|&a| a <= 0.0) {
+                return Some(false);
+            }
+            Some(lum == 0.0)
+        }
     }
 }
 

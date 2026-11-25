@@ -33,11 +33,11 @@ pub fn sections(options: &Options) -> Sections {
     }
 }
 
-/// Чи є серед увімкнених правил хоч одне повне.
+/// Чи є серед увімкнених правил хоч одне повне або з повною частиною.
 pub fn wanted(options: &Options) -> bool {
     RULES
         .iter()
-        .any(|r| r.full && lint::is_active(options, r.code))
+        .any(|r| (r.full || r.partial) && lint::is_active(options, r.code))
 }
 
 /// Компілює документ і збирає факти.

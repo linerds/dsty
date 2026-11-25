@@ -25,8 +25,38 @@ use dsty::full::{Sections, wrapper};
 use dsty::model;
 use dsty::work::{Element, Fact, FigureKind, Work};
 
-/// Запит після компіляції: надруковані номери з тією самою нумерацією, що в
-/// документі. Окремий від запиту повної перевірки: помилка тут її не зачепить.
+/// Проба ефективних стилів тексту й сторінки для звірки (не входить у продакшн `probe.typ`).
+const STYLE_PROBE: &str = r#"#let _cf-num(v) = if type(v) == length { v.to-absolute().pt() } else if type(v) == relative {
+  v.length.to-absolute().pt()
+} else { none }
+#let _cf-font(f) = if type(f) == array { f.at(0, default: "") } else if type(f) == str { f } else { "" }
+#let _cf-side(m, name) = if type(m) == dictionary {
+  let v = m.at(name, default: m.at(if name in ("left", "right") { "x" } else { "y" }, default: m.at("rest", default: auto)))
+  _cf-num(v)
+} else { _cf-num(m) }
+#show par: it => {
+  context {
+    let m = page.margin
+    let w = page.width.to-absolute().pt()
+    let h = page.height.to-absolute().pt()
+    let auto-m = calc.min(w, h) * 2.5 / 21.0
+    let side(n) = { let v = _cf-side(m, n); if v == none { auto-m } else { v } }
+    [#metadata((
+      k: "par-style",
+      key: "",
+      size: text.size.to-absolute().pt(),
+      font: _cf-font(text.font),
+      w: w,
+      h: h,
+      margins: (side("top"), side("right"), side("bottom"), side("left")),
+    ))<dsty-conform>]
+  }
+  it
+}
+"#;
+
+/// Запит після компіляції: надруковані номери, підписи, переліки й стилі з
+/// тією самою розкладкою, що в документі. Окремий від запиту повної перевірки.
 const QUERY: &str = r#"{
   let plain(c) = {
     if type(c) == str { return c }
@@ -38,12 +68,14 @@ const QUERY: &str = r#"{
     if c.func() == [ ].func() { return " " }
     ""
   }
+  let lab(e) = if e.has("label") { str(e.label) } else { "" }
   let printed(n, nums) = if n == none { none } else { plain(numbering(n, ..nums)) }
-  let lab(e) = if e.has("label") { str(e.label) } else { none }
-  query(selector(heading).or(figure).or(math.equation).or(footnote)).map(e => {
+  query(selector(heading).or(figure).or(figure.caption).or(math.equation).or(footnote).or(list).or(enum).or(<dsty-conform>)).map(e => {
     let l = e.location()
     let f = e.func()
-    if f == heading {
+    if f == metadata {
+      e.value
+    } else if f == heading {
       (k: "heading", key: plain(e.body), num: printed(e.numbering, counter(heading).at(l)))
     } else if f == figure {
       (
@@ -53,10 +85,24 @@ const QUERY: &str = r#"{
         supplement: plain(e.supplement),
         num: printed(e.numbering, e.counter.at(l)),
       )
+    } else if f == figure.caption {
+      (
+        k: "caption",
+        key: plain(e.body),
+        separator: if e.separator == auto { none } else { plain(e.separator) },
+        top: e.position == top,
+      )
     } else if f == math.equation {
-      if e.block { (k: "equation", key: "", num: printed(e.numbering, counter(math.equation).at(l))) }
+      if e.block { (k: "equation", key: lab(e), num: printed(e.numbering, counter(math.equation).at(l))) }
     } else if f == footnote {
       (k: "footnote", key: "", num: printed(e.numbering, counter(footnote).at(l)))
+    } else if f == list {
+      let m = e.marker
+      let first = if e.children.len() > 0 { plain(e.children.at(0).body) } else { "" }
+      (k: "list", key: first, num: if type(m) == array { plain(m.at(0)) } else { plain(m) })
+    } else if f == enum {
+      let first = if e.children.len() > 0 { plain(e.children.at(0).body) } else { "" }
+      (k: "enum", key: first, num: printed(e.numbering, (1,)))
     }
   }).filter(x => x != none)
 }"#;
@@ -66,10 +112,26 @@ struct Compiled {
     k: String,
     #[serde(default)]
     kind: String,
+    #[serde(default)]
     key: String,
     #[serde(default)]
     supplement: Option<String>,
+    #[serde(default)]
+    separator: Option<String>,
+    #[serde(default)]
+    top: Option<bool>,
+    #[serde(default)]
     num: Option<String>,
+    #[serde(default)]
+    size: Option<f64>,
+    #[serde(default)]
+    font: Option<String>,
+    #[serde(default)]
+    w: Option<f64>,
+    #[serde(default)]
+    h: Option<f64>,
+    #[serde(default)]
+    margins: Option<[f64; 4]>,
 }
 
 /// Підсумок одного виду фактів.
@@ -233,11 +295,8 @@ fn compile(typst: &Path, root: &Path, main: &Path) -> anyhow::Result<Vec<Compile
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(wrapper(&rel, sections).as_bytes())?;
+    let input = format!("{STYLE_PROBE}{}", wrapper(&rel, sections));
+    child.stdin.take().unwrap().write_all(input.as_bytes())?;
     let out = child.wait_with_output()?;
     if !out.status.success() {
         anyhow::bail!(
@@ -417,7 +476,7 @@ fn check(ctx: &mut Ctx, typst: &Path, main: &Path) -> anyhow::Result<()> {
         }
     }
 
-    // Формули: за порядком
+    // Формули: за міткою (інакше за порядком)
     let eqs: Vec<_> = w
         .elements
         .iter()
@@ -427,8 +486,14 @@ fn check(ctx: &mut Ctx, typst: &Path, main: &Path) -> anyhow::Result<()> {
         })
         .collect();
     let ce = of("equation");
-    let a = vec![String::new(); eqs.len()];
-    let b = vec![String::new(); ce.len()];
+    let a: Vec<String> = eqs
+        .iter()
+        .map(|q| match &q.label {
+            Some(dsty::work::Label::Name(l)) => l.clone(),
+            _ => String::new(),
+        })
+        .collect();
+    let b: Vec<String> = ce.iter().map(|c| c.key.clone()).collect();
     for pair in align(&a, &b) {
         match pair {
             (Some(i), Some(j)) => {
@@ -461,6 +526,157 @@ fn check(ctx: &mut Ctx, typst: &Path, main: &Path) -> anyhow::Result<()> {
         };
         ctx.compare("позначка виноски", "", &m, first.num.as_deref());
     }
+
+    // Підписи: розділювач і розміщення (`top`/`bottom`)
+    let cap_figs: Vec<_> = w
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            Element::Figure(f) if f.caption.is_some() => Some(f),
+            _ => None,
+        })
+        .collect();
+    let cc = of("caption");
+    let a: Vec<_> = cap_figs
+        .iter()
+        .map(|f| key(f.caption.as_ref().unwrap().trimmed()))
+        .collect();
+    let b: Vec<_> = cc.iter().map(|c| key(&c.key)).collect();
+    for pair in align(&a, &b) {
+        if let (Some(i), Some(j)) = pair {
+            let f = cap_figs[i];
+            let at = place(&f.loc);
+            if let Some(sep) = cc[j].separator.as_deref() {
+                let s = match &f.look.separator {
+                    Fact::Known(s, why) => Fact::Known(Some(s.clone()), why.clone()),
+                    Fact::Unknown => Fact::Unknown,
+                };
+                ctx.compare("розділювач підпису", &at, &s, Some(sep));
+            }
+            if let Some(top) = cc[j].top {
+                let t = match &f.look.top {
+                    Fact::Known(v, why) => {
+                        Fact::Known(Some(if *v { "top" } else { "bottom" }.into()), why.clone())
+                    }
+                    Fact::Unknown => Fact::Unknown,
+                };
+                ctx.compare(
+                    "позиція підпису",
+                    &at,
+                    &t,
+                    Some(if top { "top" } else { "bottom" }),
+                );
+            }
+        }
+    }
+
+    // Переліки: позначка першої позиції
+    for (enumerated, tag) in [(false, "list"), (true, "enum")] {
+        let lists: Vec<_> = w
+            .elements
+            .iter()
+            .filter_map(|e| match e {
+                Element::List(l) if l.enumerated == enumerated => Some(l),
+                _ => None,
+            })
+            .collect();
+        let cl = of(tag);
+        let a: Vec<_> = lists
+            .iter()
+            .map(|l| {
+                l.items
+                    .first()
+                    .map_or(String::new(), |it| key(it.text.trimmed()))
+            })
+            .collect();
+        let b: Vec<_> = cl.iter().map(|c| key(&c.key)).collect();
+        for pair in align(&a, &b) {
+            if let (Some(i), Some(j)) = pair {
+                let l = lists[i];
+                let at = l
+                    .items
+                    .first()
+                    .map_or_else(String::new, |it| place(&it.loc));
+                let m = match &l.marker {
+                    Fact::Known(m, why) => Fact::Known(Some(m.clone()), why.clone()),
+                    Fact::Unknown => Fact::Unknown,
+                };
+                ctx.compare("позначка переліку", &at, &m, cl[j].num.as_deref());
+            }
+        }
+    }
+
+    // Основний текст і сторінка: кегль, шрифт, формат і береги першого абзацу
+    let body_start = w.body_start().unwrap_or(0);
+    if let (Some(par), Some(ps)) = (
+        w.elements[body_start..].iter().find_map(|e| match e {
+            Element::Par(p) => Some(p),
+            _ => None,
+        }),
+        of("par-style").last().copied(),
+    ) {
+        let look = &w.looks[par.look];
+        let round = |v: f64| format!("{:.1}", (v * 10.0).round() / 10.0);
+        if let Some(sz) = ps.size {
+            let s = match &look.text.size {
+                Fact::Known(v, why) => Fact::Known(Some(round(*v)), why.clone()),
+                Fact::Unknown => Fact::Unknown,
+            };
+            ctx.compare("кегль тексту", "", &s, Some(&round(sz)));
+        }
+        if let Some(font) = &ps.font {
+            let f = match &look.text.font {
+                Fact::Known(v, why) => Fact::Known(Some(v.to_lowercase()), why.clone()),
+                Fact::Unknown => Fact::Unknown,
+            };
+            ctx.compare("шрифт тексту", "", &f, Some(&font.to_lowercase()));
+        }
+        if let (Some(pw), Some(ph)) = (ps.w, ps.h) {
+            let p = match &look.paper {
+                Fact::Known(p, why) => match (p.w, p.h) {
+                    (Some(w), Some(h)) => {
+                        Fact::Known(Some(format!("{}x{}", round(w), round(h))), why.clone())
+                    }
+                    _ => Fact::Unknown,
+                },
+                Fact::Unknown => Fact::Unknown,
+            };
+            ctx.compare(
+                "формат сторінки",
+                "",
+                &p,
+                Some(&format!("{}x{}", round(pw), round(ph))),
+            );
+        }
+        if let Some(ms) = ps.margins {
+            let m = match &look.margins {
+                [
+                    Fact::Known(t, why),
+                    Fact::Known(r, _),
+                    Fact::Known(b, _),
+                    Fact::Known(l, _),
+                ] => Fact::Known(
+                    Some(format!(
+                        "{},{},{},{}",
+                        round(*t),
+                        round(*r),
+                        round(*b),
+                        round(*l)
+                    )),
+                    why.clone(),
+                ),
+                _ => Fact::Unknown,
+            };
+            let want = format!(
+                "{},{},{},{}",
+                round(ms[0]),
+                round(ms[1]),
+                round(ms[2]),
+                round(ms[3])
+            );
+            ctx.compare("береги сторінки", "", &m, Some(&want));
+        }
+    }
     Ok(())
 }
 
@@ -470,6 +686,7 @@ fn main() -> anyhow::Result<()> {
     let mut verbose = false;
     let mut unknowns = false;
     let mut all = false;
+    let mut strict = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -477,6 +694,7 @@ fn main() -> anyhow::Result<()> {
             "-v" => verbose = true,
             "-u" => unknowns = true,
             "-a" => all = true,
+            "--strict" => strict = true,
             _ => files.push(PathBuf::from(a)),
         }
     }
@@ -518,6 +736,10 @@ fn main() -> anyhow::Result<()> {
             "{what:<18} {:>6} {:>6} {:>9} {:>9} {:>8}",
             t.agree, t.differ, t.unknown, t.opaque, t.unpaired
         );
+    }
+    let total_differ: usize = ctx.tally.values().map(|t| t.differ).sum();
+    if strict && (total_differ > 0 || failed > 0) {
+        anyhow::bail!("розбіжностей: {total_differ}, не скомпільовано: {failed}");
     }
     Ok(())
 }

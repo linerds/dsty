@@ -173,11 +173,11 @@ fn figures() {
         found,
         [
             ("caption-case", "мала літера"),
-            ("figure-unreferenced", "Без посилання"),
+            ("unreferenced", "Без посилання"),
             ("figure-before-ref", "Раніше"),
             ("table-header-period", "час."),
             ("table-header-case", "час."),
-            ("figure-unreferenced", "Обгортка"),
+            ("unreferenced", "Обгортка"),
         ]
     );
 }
@@ -266,16 +266,22 @@ fn list_period_in_the_middle_and_semicolon_at_the_end() {
 
 #[test]
 fn numbered_list_without_references() {
-    // 7.7.2: нумерований перелік без посилань на позиції позначають «–»
+    // 7.7.2: нумерований перелік без посилань на позиції позначають «–» (правило опційне)
     let src = "Завдання:\n+ завдання 1: розробити;\n+ завдання 2: перевірити.\n";
-    let diags = run(src);
+    assert!(
+        !rules(src).contains(&"list-unreferenced"),
+        "list-unreferenced має бути опційним: {:?}",
+        run(src)
+    );
+    let diags = run_with(src, &["list-unreferenced"]);
     let found: Vec<_> = diags.iter().map(|d| (d.rule, pointed(src, d))).collect();
     assert_eq!(found, [("list-unreferenced", "+")], "{diags:?}");
     // Посилання шукаються лише за зразками: виправлення пропонується, але
     // `--fix` його не застосовує
-    assert_eq!(fixed(src), src);
+    let refs: Vec<&Diagnostic> = diags.iter().collect();
+    assert_eq!(lint::apply_fixes(src, &refs).0, src);
     assert_eq!(
-        quick_fixed(src),
+        apply_quick(src, &diags),
         "Завдання:\n- завдання 1: розробити;\n- завдання 2: перевірити.\n"
     );
     // Посилання на позицію, маркований і вкладений перелік: мовчить
@@ -284,10 +290,10 @@ fn numbered_list_without_references() {
         "Кроки:\n- перший;\n- другий.\n",
         "Кроки:\n+ перший:\n  - а;\n  - б.\n+ другий.\n",
     ] {
+        let diags = run_with(ok, &["list-unreferenced"]);
         assert!(
-            !rules(ok).contains(&"list-unreferenced"),
-            "{ok}: {:?}",
-            run(ok)
+            !diags.iter().any(|d| d.rule == "list-unreferenced"),
+            "{ok}: {diags:?}"
         );
     }
 }
@@ -342,7 +348,7 @@ fn appendices() {
     );
     assert_eq!(
         rules(&src),
-        ["appendix-order", "appendix-unreferenced", "appendix-case"]
+        ["appendix-order", "unreferenced", "heading-case"]
     );
 }
 
@@ -368,7 +374,7 @@ fn dynamic_labels_are_not_guessed() {
     let src = format!(
         "{TPL}#show: style.appendices\n#for f in (\"a\", \"b\") [\n  #heading[Файл #f] #label(str(\"app_\" + f))\n]\n#heading[Файл] #label(\"lit\")\n"
     );
-    assert_eq!(content_rules(&src), ["appendix-unreferenced"]);
+    assert_eq!(content_rules(&src), ["unreferenced"]);
 }
 
 #[test]
@@ -387,11 +393,7 @@ fn units_are_optional() {
     let src = "Плата 80 х 25 х 50 мм, відстань 5мм, від 1 до 5 мм і 10--20 МГц.\nПравильно: 5 мм, від 1 мм до 5 мм, 80 мм × 25 мм, 2010--2015 роки.\n";
     assert!(rules(src).is_empty());
     let options = Options {
-        enable: vec![
-            "unit-space".into(),
-            "unit-range".into(),
-            "unit-dimensions".into(),
-        ],
+        enable: vec!["units".into()],
         ..Default::default()
     };
     let report = run_files(&[("main.typ", src)], &options);
@@ -403,10 +405,10 @@ fn units_are_optional() {
     assert_eq!(
         found,
         [
-            ("unit-dimensions", "80 х 25 х 50 мм"),
-            ("unit-space", "5мм"),
-            ("unit-range", "від 1 до 5 мм"),
-            ("unit-range", "10--20 МГц"),
+            ("units", "80 х 25 х 50 мм"),
+            ("units", "5мм"),
+            ("units", "від 1 до 5 мм"),
+            ("units", "10--20 МГц"),
         ]
     );
     let diags: Vec<&Diagnostic> = report.diagnostics.iter().collect();
@@ -547,7 +549,7 @@ fn assumptions() {
     let diags = run(src);
     assert_eq!(
         diags.iter().map(|d| d.rule).collect::<Vec<_>>(),
-        ["formula-where", "note-format", "note-format"]
+        ["formula-where", "note-style", "note-style"]
     );
     assert!(diags.iter().all(|d| d.assumed.is_none()), "{diags:?}");
     assert_eq!(
@@ -588,11 +590,11 @@ fn template_show_ref() {
 fn note_numbering() {
     // Одна примітка з номером
     let src = "Текст.\n\nПримітка 1. Пояснення.\n";
-    assert_eq!(rules(src), ["note-numbering"]);
+    assert_eq!(rules(src), ["note-style"]);
     assert_eq!(quick_fixed(src), "Текст.\n\nПримітка. Пояснення.\n");
     // Кілька поспіль: без номера й з неправильним номером
     let src = "Примітка. Перша.\n\nПримітка 3. Друга.\n\nПримітка 3. Третя.\n";
-    assert_eq!(rules(src), ["note-numbering", "note-numbering"]);
+    assert_eq!(rules(src), ["note-style", "note-style"]);
     assert_eq!(
         quick_fixed(src),
         "Примітка 1. Перша.\n\nПримітка 2. Друга.\n\nПримітка 3. Третя.\n"
@@ -1019,8 +1021,8 @@ fn wrappers_are_recognized_by_what_they_build() {
         found,
         [
             ("caption-case", "інший"),
-            ("figure-unreferenced", "інший"),
-            ("figure-unreferenced", "Графік"),
+            ("unreferenced", "інший"),
+            ("unreferenced", "Графік"),
         ],
         "{:#?}",
         report.diagnostics
@@ -1315,7 +1317,7 @@ fn inline_text_and_notes() {
         [
             ("font-size", "text(size: 10pt)[дрібний]".to_owned()),
             ("font-family", "text(font: \"Arial\")[інший]".to_owned()),
-            ("note-size", "Примітка. Примітка кеглем 14.".to_owned()),
+            ("note-style", "Примітка. Примітка кеглем 14.".to_owned()),
         ]
     );
     let src = format!(
@@ -1427,7 +1429,7 @@ fn loops_over_range_enumerate_and_dict() {
     let captions = |src: &str| -> Vec<String> {
         run(src)
             .into_iter()
-            .filter(|d| d.rule == "figure-unreferenced")
+            .filter(|d| d.rule == "unreferenced")
             .map(|d| d.msg)
             .collect()
     };
@@ -1470,7 +1472,7 @@ fn let_destructuring_and_calc() {
 fn appendix_status() {
     // Додаток упізнано за нумерацією літерою: лише припущення
     let diags = run("#set heading(numbering: \"А.1\")\n= додаток з малої\n");
-    let case: Vec<_> = diags.iter().filter(|d| d.rule == "appendix-case").collect();
+    let case: Vec<_> = diags.iter().filter(|d| d.rule == "heading-case").collect();
     assert_eq!(case.len(), 1, "{diags:?}");
     assert!(case[0].assumed.is_some());
     // Нумерацію видно, ознак додатка немає: що це не додаток, певно
@@ -1509,4 +1511,228 @@ fn builtin_show_set_under_show_function() {
         !diags.iter().any(|d| d.msg.contains("не напівжирним")),
         "{diags:?}"
     );
+}
+
+#[test]
+fn rgb_color_edge_cases() {
+    // Багатобайтні UTF-8 рядки завдовжки 4 і 8 байтів не панікують; порожні
+    // й некоректні рядки дають невідомий колір (мовчать)
+    for bad in [
+        r#"rgb("аа")"#,
+        r#"rgb("аааа")"#,
+        r#"rgb("")"#,
+        r##"rgb("#")"##,
+        r#"rgb("0")"#,
+        r#"rgb("00")"#,
+    ] {
+        let src = format!("#set text(fill: {bad})\n= Вступ\nТекст.\n");
+        let diags = run_with(&src, &["font-style"]);
+        assert!(
+            !diags.iter().any(|d| d.rule == "font-style"),
+            "{bad}: {diags:?}"
+        );
+    }
+    // Прозорий колір (альфа = 0) — не чорний
+    for transparent in [
+        r##"rgb("#0000")"##,
+        r##"rgb("#00000000")"##,
+        r#"rgb(0, 0, 0, 0%)"#,
+        r#"luma(0, 0%)"#,
+    ] {
+        let src = format!("#set text(fill: {transparent})\n= Вступ\nТекст.\n");
+        let diags = run_with(&src, &["font-style"]);
+        assert!(
+            diags.iter().any(|d| d.rule == "font-style"),
+            "{transparent}: {diags:?}"
+        );
+    }
+    // Звичайний чорний з альфою != 0 — чорний
+    let src = "#set text(fill: rgb(\"#000f\"))\n= Вступ\nТекст.\n";
+    let diags = run_with(src, &["font-style"]);
+    assert!(!diags.iter().any(|d| d.rule == "font-style"), "{diags:?}");
+}
+
+#[test]
+fn page_spread_keeps_explicit_args() {
+    let src = r#"#set page(..unknown, numbering: "1.", number-align: center + bottom, header: auto, footer: auto)
+= Вступ
+Текст.
+"#;
+    let diags = run(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.rule == "page-number" && d.msg.contains("«2.»")),
+        "{diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.rule == "page-number" && d.msg.contains("center + bottom")),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn structure_name_is_partial_and_wanted_includes_partial() {
+    // Без --full ignore для `structure-name` не дає хибного `ignore-unused`
+    let src = "// dstu-ignore-next-line: structure-name\n= Вступ\nТекст.\n";
+    let diags = run(src);
+    assert!(
+        !diags.iter().any(|d| d.rule == "ignore-unused"),
+        "{diags:?}"
+    );
+    // `full::wanted` спрацьовує, навіть якщо всі суто-повні правила вимкнено,
+    // але активне хоча б одне `static+full` правило
+    let pure_full: Vec<String> = dsty::rules::RULES
+        .iter()
+        .filter(|r| r.full)
+        .map(|r| r.code.to_owned())
+        .collect();
+    let opts = Options {
+        ignore: pure_full,
+        ..Default::default()
+    };
+    assert!(dsty::full::wanted(&opts));
+}
+
+#[test]
+fn prose_rules_skip_code_math_and_links() {
+    let src = r#"= Робота з `рис.` і $x$
+Ширина `50%`, формула $100%$ і посилання https://example.com/a10%20b не є порушеннями.
+А ось 100мм і 10--20 мм — справжні порушення.
+"#;
+    let diags = run_with(src, &["units", "heading-abbrev"]);
+    assert!(
+        !diags.iter().any(|d| d.rule == "heading-abbrev"),
+        "{diags:?}"
+    );
+    let spaces: Vec<_> = diags
+        .iter()
+        .filter(|d| d.rule == "units" && d.msg.contains("проміжку"))
+        .collect();
+    assert_eq!(spaces.len(), 1, "{spaces:?}");
+    assert!(spaces[0].msg.contains("«100мм»"), "{:?}", spaces[0].msg);
+    let (fixed, _) = dsty::lint::apply_fixes(src, &[spaces[0]]);
+    assert!(fixed.contains("А ось 100~мм"), "{fixed}");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.rule == "units" && d.msg.contains("діапазон")),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn show_equation_and_show_emph_fidelity() {
+    // `show math.equation: it => align(center, it.body)` прибирає номер формули
+    let src = r#"#set math.equation(numbering: "(1)")
+#show math.equation: it => align(center, it.body)
+= Вступ
+$ a + b = c $
+"#;
+    let diags = run(src);
+    assert!(
+        !diags.iter().any(|d| d.rule == "formula-numbering"),
+        "{diags:?}"
+    );
+    // `show emph: set text(style: "normal")` і `show emph: it => strong(it.body)`
+    // вимикають курсив на `_..._`
+    for rule_line in [
+        r#"#show emph: set text(style: "normal")"#,
+        r#"#show emph: it => strong(it.body)"#,
+    ] {
+        let src = format!("{rule_line}\n= Вступ\nТекст _прямий_ у рядку.\n");
+        let diags = run_with(&src, &["font-style"]);
+        assert!(
+            !diags.iter().any(|d| d.rule == "font-style"),
+            "{rule_line}: {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn top_level_let_shadowing_respects_order() {
+    let src = r#"#let sz = 14pt
+#set text(size: sz, font: "Times New Roman")
+= Вступ
+Текст правильного кегля.
+#let sz = 10pt
+"#;
+    let diags = run(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.rule == "font-size" && d.msg.contains("основний текст")),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn per_region_page_styles_catch_mid_document_switch() {
+    let src = r#"#set page(paper: "a4", numbering: "1", number-align: top + right)
+= Розділ перший
+Текст першого розділу.
+
+#set page(numbering: none)
+= Розділ другий
+Текст другого розділу без номера сторінки.
+"#;
+    let diags = run(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.rule == "page-number" && d.msg.contains("не пронумеровано")),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn caption_position_checks_horizontal_alignment() {
+    // Рисунок вирівняно ліворуч, таблицю — за замовчуванням (посередині й знизу)
+    let bad = r#"#set text(lang: "uk")
+#show figure.where(kind: image): set align(left)
+= Розділ
+Див. @f[рис.] і @t[табл.].
+#figure(rect(), caption: [Схема]) <f>
+#figure(table(columns: 1, [А]), caption: [Дані]) <t>
+"#;
+    let diags = run_with(bad, &["caption-position"]);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.rule == "caption-position" && d.msg.contains("не посередині")),
+        "{diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.rule == "caption-position" && d.msg.contains("не ліворуч")),
+        "{diags:?}"
+    );
+    // Правильно: рисунок знизу посередині, таблиця зверху ліворуч
+    let good = r#"#set text(lang: "uk")
+#show figure.where(kind: table): set figure.caption(position: top)
+#show figure.where(kind: table): set align(left)
+= Розділ
+Див. @f[рис.] і @t[табл.].
+#figure(rect(), caption: [Схема]) <f>
+#figure(table(columns: 1, [А]), caption: [Дані]) <t>
+"#;
+    let diags = run_with(good, &["caption-position"]);
+    assert!(
+        !diags.iter().any(|d| d.rule == "caption-position"),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn opaque_template_forgets_indent_all_and_edges() {
+    let src = r#"#import "@preview/unknown-tpl:0.1.0": tpl
+#show: tpl
+= Вступ
+Абзац після заголовка.
+"#;
+    let diags = run(src);
+    assert!(!diags.iter().any(|d| d.rule == "par-indent"), "{diags:?}");
 }

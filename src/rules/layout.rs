@@ -6,8 +6,8 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use super::{
-    CITE_GROUP, Checker, Msg, STRUCTURE_VARIANT, canonical_name, cite_out_of_order, structural,
-    structural_variant, with_help,
+    CITE_GROUP, Checker, Msg, STRUCTURE_VARIANT, canonical_name, cite_out_of_order, is_author_date,
+    structural, structural_variant, with_help,
 };
 use crate::text::{mm, quote};
 use crate::work::{At, Element, FigureKind, Heading, HeadingPrint, TableSplit};
@@ -348,14 +348,47 @@ impl Checker<'_> {
         }
     }
 
-    /// Порядок номерів джерел (5.5.1), як їх надруковано: для `@ключ` з
-    /// `bibliography` номери дає стиль. Набрані вручну «[N]» перевіряє
-    /// статична частина правила.
+    /// Порядок номерів джерел (5.5.1) і формат посилань (7.11.3), як їх
+    /// надруковано: для `@ключ` з `bibliography` вигляд дає стиль CSL, тож у
+    /// коді його не завжди видно.
     fn printed_citations(&mut self) {
         let work = self.work;
         let Some(citations) = work.citations.known() else {
             return;
         };
+        // 5.5.1, 7.11.3: надруковані посилання мають бути номерами в квадратних
+        // дужках (`[1]`), а не автором і роком (`(Smith, 2020)`)
+        let static_style_flagged = work
+            .bibs
+            .iter()
+            .any(|b| b.style.as_ref().is_some_and(|(s, _)| is_author_date(s)));
+        if !static_style_flagged && !citations.is_empty() {
+            let has_bracket_num = citations.iter().any(|(_, text)| CITE_GROUP.is_match(text));
+            if !has_bracket_num
+                && let Some((loc, sample)) = citations
+                    .iter()
+                    .find(|(_, text)| text.chars().any(char::is_alphabetic))
+            {
+                let target = work
+                    .bibs
+                    .iter()
+                    .find_map(|b| b.style.as_ref().map(|(_, l)| l.clone()))
+                    .unwrap_or_else(|| loc.clone());
+                self.add(
+                    "bibliography-style",
+                    Some(target),
+                    with_help(
+                        format!(
+                            "посилання на джерела надруковано як {}, а не номером у квадратних дужках",
+                            quote(sample)
+                        ),
+                        "Посилатися номером у квадратних дужках",
+                    ),
+                    Vec::new(),
+                );
+                return;
+            }
+        }
         let mut seen = 0u32;
         for (loc, text) in citations {
             for c in CITE_GROUP.captures_iter(text) {

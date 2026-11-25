@@ -181,8 +181,8 @@ pub const RULES: &[Rule] = &[
     ),
     rule(
         "heading-case",
-        "7.1.21",
-        "Заголовки підрозділів, пунктів і підпунктів друкують з великої літери",
+        "6.2.2, 7.1.21",
+        "Заголовки підрозділів, пунктів, підпунктів і додатків друкують з великої літери",
     ),
     rule(
         "heading-numbered",
@@ -205,16 +205,12 @@ pub const RULES: &[Rule] = &[
         "structure-name",
         "7.1.18",
         "Структурні елементи мають назви зі стандарту: «Висновки», «Перелік джерел посилання», «Вступ»",
-    ),
+    )
+    .probes(0),
     rule(
-        "figure-unreferenced",
-        "7.5.2",
-        "Рисунок подають після тексту, де на нього вперше посилаються",
-    ),
-    rule(
-        "table-unreferenced",
-        "7.6.3",
-        "На кожну таблицю має бути посилання в тексті",
+        "unreferenced",
+        "6.1.2, 7.5.2, 7.6.3",
+        "На кожний рисунок, таблицю й додаток має бути посилання в тексті",
     ),
     rule(
         "figure-before-ref",
@@ -270,19 +266,9 @@ pub const RULES: &[Rule] = &[
         "Скорочення й умовні познаки розташовують за абеткою: спершу українські, потім інші",
     ),
     rule(
-        "appendix-unreferenced",
-        "6.1.2",
-        "Додатки розміщують у порядку посилання на них у тексті",
-    ),
-    rule(
         "appendix-order",
         "6.1.2",
         "Додатки розміщують у порядку посилання на них у тексті",
-    ),
-    rule(
-        "appendix-case",
-        "6.2.2",
-        "Заголовок додатка друкують з великої літери",
     ),
     rule(
         "structure-order",
@@ -303,21 +289,17 @@ pub const RULES: &[Rule] = &[
         "bibliography-style",
         "5.5.1, 7.11.3",
         "На джерела посилаються номерами в квадратних дужках, а не автором і роком",
-    ),
+    )
+    .probes(TEXT),
     rule(
         "heading-empty",
         "7.1.19",
         "Розділи й підрозділи мають заголовок",
     ),
     rule(
-        "note-format",
+        "note-style",
         "7.8.3, 7.8.4",
-        "Примітку починають словом «Примітка.» («Примітка 1.»), її текст — з великої літери",
-    ),
-    rule(
-        "note-numbering",
-        "7.8.3, 7.8.4",
-        "Одну примітку не нумерують, кілька — нумерують: «Примітка 1.», «Примітка 2.»",
+        "Примітку починають словом «Примітка.» («Примітка 1.»), текст — з великої літери, кеглем 12 через один інтервал; одну не нумерують, кілька — нумерують",
     ),
     rule(
         "structure-required",
@@ -331,21 +313,9 @@ pub const RULES: &[Rule] = &[
         "Значення з допуском: «(80 ± 2) мм» або «80 мм ± 2 мм», а не «80 ± 2 мм»",
     ),
     rule(
-        "unit-space",
-        "7.10.7",
-        "Між числом і одиницею виміру залишають проміжок",
-    )
-    .optional(),
-    rule(
-        "unit-range",
-        "7.10.12.2",
-        "Діапазон значень наводять зі словами «від» і «до» та одиницею біля кожного числа",
-    )
-    .optional(),
-    rule(
-        "unit-dimensions",
-        "7.10.12.3",
-        "Розміри наводять з одиницею біля кожного числа: 80 мм × 25 мм",
+        "units",
+        "7.10.7, 7.10.12.2, 7.10.12.3",
+        "Між числом і одиницею залишають проміжок; у діапазонах і розмірах одиницю пишуть біля кожного числа",
     )
     .optional(),
     rule(
@@ -505,7 +475,8 @@ pub const RULES: &[Rule] = &[
         "list-unreferenced",
         "7.7.2",
         "Переліки одного рівня, на позиції яких немає посилань, позначають «–», а не нумерують",
-    ),
+    )
+    .optional(),
     rule(
         "list-indent",
         "7.7.4",
@@ -562,12 +533,6 @@ pub const RULES: &[Rule] = &[
         "7.1.22",
         "Абзацний відступ однаковий у всьому тексті й дорівнює п'яти знакам",
     ),
-    rule(
-        "note-size",
-        "7.8.3",
-        "Примітку друкують кеглем 12 через один міжрядковий інтервал",
-    )
-,
     rule(
         "appendix-letter",
         "6.2.2, 7.15.1",
@@ -871,7 +836,7 @@ fn case_of(text: &Text) -> Option<Case> {
 
 /// Стилі `bibliography`, що посилаються автором і роком чи виноскою, а не
 /// номером (5.5.1, 7.11.3).
-fn is_author_date(style: &str) -> bool {
+pub(crate) fn is_author_date(style: &str) -> bool {
     let style = style.to_lowercase();
     let style = style.trim_end_matches(".csl");
     [
@@ -896,35 +861,61 @@ fn is_author_date(style: &str) -> bool {
 const UNITS: &str = "мм|см|дм|км|мкм|нм|м|кг|мг|мкс|мс|нс|с|хв|год|ГГц|МГц|кГц|Гц|кВ|мВ|мкВ|В|мА|мкА|А|МОм|кОм|Ом|МВт|кВт|мВт|Вт|кДж|Дж|кН|Н|МПа|кПа|Па|дБ|°C|мл|л|Гбіт|Мбіт|Кбіт|біт|байт|ГБ|МБ|КБ|ТБ|%";
 const NUM: &str = r"\d+(?:[,.]\d+)?";
 
-static UNIT_CHECKS: LazyLock<Vec<(&'static str, Regex, &'static str)>> = LazyLock::new(|| {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnitKind {
+    Space,
+    Range,
+    Tolerance,
+    Dimensions,
+}
+
+struct UnitCheck {
+    kind: UnitKind,
+    rule: &'static str,
+    clause: &'static str,
+    regex: Regex,
+    msg: &'static str,
+}
+
+static NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(NUM).unwrap());
+
+static UNIT_CHECKS: LazyLock<Vec<UnitCheck>> = LazyLock::new(|| {
     let end = format!("(?:{UNITS})(?:[^\\p{{L}}]|$)");
     vec![
-        (
-            "unit-space",
-            Regex::new(&format!(r"\d{end}")).unwrap(),
-            "між числом і одиницею немає проміжку: ",
-        ),
-        (
-            "unit-range",
-            Regex::new(&format!(
+        UnitCheck {
+            kind: UnitKind::Space,
+            rule: "units",
+            clause: "7.10.7",
+            regex: Regex::new(&format!(r"{NUM}{end}")).unwrap(),
+            msg: "між числом і одиницею немає проміжку: ",
+        },
+        UnitCheck {
+            kind: UnitKind::Range,
+            rule: "units",
+            clause: "7.10.12.2",
+            regex: Regex::new(&format!(
                 r"(?:від\s+{NUM}\s+до\s+{NUM}|{NUM}\s*[-–—]\s*{NUM})\s*{end}"
             ))
             .unwrap(),
-            "діапазон без «від … до» чи з однією одиницею: ",
-        ),
-        (
-            "unit-tolerance",
-            Regex::new(&format!(r"{NUM}\s*±\s*{NUM}\s*{end}")).unwrap(),
-            "значення з допуском без дужок: ",
-        ),
-        (
-            "unit-dimensions",
-            Regex::new(&format!(
+            msg: "діапазон без «від … до» чи з однією одиницею: ",
+        },
+        UnitCheck {
+            kind: UnitKind::Tolerance,
+            rule: "unit-tolerance",
+            clause: "7.10.12.1",
+            regex: Regex::new(&format!(r"{NUM}\s*±\s*{NUM}\s*{end}")).unwrap(),
+            msg: "значення з допуском без дужок: ",
+        },
+        UnitCheck {
+            kind: UnitKind::Dimensions,
+            rule: "units",
+            clause: "7.10.12.3",
+            regex: Regex::new(&format!(
                 r"{NUM}\s*[xх×]\s*{NUM}(?:\s*[xх×]\s*{NUM})?\s*{end}"
             ))
             .unwrap(),
-            "розміри з однією одиницею на всі числа: ",
-        ),
+            msg: "розміри з однією одиницею на всі числа: ",
+        },
     ]
 });
 
@@ -1135,21 +1126,27 @@ impl Checker<'_> {
                     fix.into_iter().collect(),
                 );
             }
-            if !h.generated
-                && let Some(m) = HEADING_ABBREV.captures(&title).and_then(|c| c.get(1))
-            {
-                let start = h.title.trimmed_range().start + m.start();
-                self.add(
-                    "heading-abbrev",
-                    h.title
-                        .loc(start..start + m.len() + 1)
-                        .or(Some(h.loc.clone())),
-                    with_help(
-                        format!("скорочення «{}.» у заголовку {}", m.as_str(), quote(&title)),
-                        "Написати слово повністю",
-                    ),
-                    Vec::new(),
-                );
+            if !h.generated {
+                for m in HEADING_ABBREV
+                    .captures_iter(&title)
+                    .filter_map(|c| c.get(1))
+                {
+                    let start = h.title.trimmed_range().start + m.start();
+                    let range = start..start + m.len() + 1;
+                    if !h.title.is_prose(range.clone()) {
+                        continue;
+                    }
+                    self.add(
+                        "heading-abbrev",
+                        h.title.loc(range).or(Some(h.loc.clone())),
+                        with_help(
+                            format!("скорочення «{}.» у заголовку {}", m.as_str(), quote(&title)),
+                            "Написати слово повністю",
+                        ),
+                        Vec::new(),
+                    );
+                    break;
+                }
             }
             if h.level > 1 && case_of(&h.title) == Some(Case::Lower) {
                 self.add(
@@ -1164,9 +1161,9 @@ impl Checker<'_> {
             let appendix = h.level == 1 && h.appendix.is(&true);
             if appendix {
                 appendices.push(h);
-                if case_of(&h.title) == Some(Case::Lower) {
-                    self.add(
-                        "appendix-case",
+                if case_of(&h.title) == Some(Case::Lower)
+                    && let Some(f) = self.add(
+                        "heading-case",
                         Some(h.loc.clone()),
                         Msg::from(format!(
                             "заголовок додатка з малої літери: {}",
@@ -1174,7 +1171,9 @@ impl Checker<'_> {
                         ))
                         .assuming(&h.appendix, APPENDIX),
                         case_fix(&h.title, Case::Upper).into_iter().collect(),
-                    );
+                    )
+                {
+                    f.clause = Some("6.2.2");
                 }
             } else if h.level == 1 && h.numbered && structural.is_some() {
                 // `= Вступ` -> `#heading(numbering: none)[Вступ]`, мітка
@@ -1301,8 +1300,8 @@ impl Checker<'_> {
                 continue;
             };
             let Some(first) = first else {
-                self.add(
-                    "appendix-unreferenced",
+                if let Some(f) = self.add(
+                    "unreferenced",
                     Some(app.loc.clone()),
                     Msg::from(format!(
                         "на додаток {} немає посилання в тексті",
@@ -1310,7 +1309,9 @@ impl Checker<'_> {
                     ))
                     .assuming(&app.appendix, APPENDIX),
                     Vec::new(),
-                );
+                ) {
+                    f.clause = Some("6.1.2");
+                }
                 continue;
             };
             if last_ref.is_some_and(|last| first < last) {
@@ -1384,16 +1385,18 @@ impl Checker<'_> {
             match self.first_ref(f.label.as_ref()) {
                 Err(()) => {}
                 Ok(None) => {
-                    let rule = match f.kind {
-                        FigureKind::Table => "table-unreferenced",
-                        FigureKind::Image => "figure-unreferenced",
+                    let clause = match f.kind {
+                        FigureKind::Table => "7.6.3",
+                        FigureKind::Image => "7.5.2",
                     };
-                    self.add(
-                        rule,
+                    if let Some(found) = self.add(
+                        "unreferenced",
                         Some(loc.clone()),
                         format!("на {name_acc} немає посилання в тексті"),
                         Vec::new(),
-                    );
+                    ) {
+                        found.clause = Some(clause);
+                    }
                 }
                 Ok(Some(first)) if f.tick < first && !f.floating => {
                     self.add(
@@ -1674,8 +1677,12 @@ impl Checker<'_> {
             }
         };
         let mut referenced = vec![false; enums.len()];
-        let mut mark = |at: usize, text: &str| {
-            for c in LIST_REF.captures_iter(text) {
+        let mut mark = |at: usize, text: &Text| {
+            for c in LIST_REF.captures_iter(text.as_str()) {
+                let whole = c.get(0).unwrap().range();
+                if !text.is_prose(whole) {
+                    continue;
+                }
                 let num = c.get(1).and_then(|m| m.as_str().parse().ok());
                 let letter = c.get(2).is_some();
                 let closest = enums
@@ -1690,8 +1697,8 @@ impl Checker<'_> {
         };
         for (i, e) in work.elements.iter().enumerate() {
             match e {
-                Element::Par(p) => mark(i, p.text.as_str()),
-                Element::List(l) => l.items.iter().for_each(|it| mark(i, it.text.as_str())),
+                Element::Par(p) => mark(i, &p.text),
+                Element::List(l) => l.items.iter().for_each(|it| mark(i, &it.text)),
                 _ => {}
             }
         }
@@ -1787,7 +1794,7 @@ impl Checker<'_> {
                 && let Some(m) = CITATION
                     .captures_iter(raw)
                     .filter_map(|c| c.get(1))
-                    .find(|m| par.text.is_exact_at(m.start()))
+                    .find(|m| par.text.is_exact_at(m.start()) && par.text.is_prose(m.range()))
             {
                 cited = true;
                 self.add(
@@ -1802,7 +1809,14 @@ impl Checker<'_> {
                 );
             }
 
-            for (rule, regex, msg) in UNIT_CHECKS.iter() {
+            for UnitCheck {
+                kind,
+                rule,
+                clause,
+                regex,
+                msg,
+            } in UNIT_CHECKS.iter()
+            {
                 if !(self.active)(rule) {
                     continue;
                 }
@@ -1812,8 +1826,11 @@ impl Checker<'_> {
                         .trim_end_matches(|c: char| !(c.is_alphanumeric() || c == '%' || c == '°'));
                     let begin = m.start() + (m.as_str().len() - m.as_str().trim_start().len());
                     let range = begin..begin + found.len();
+                    if !par.text.is_prose(range.clone()) {
+                        continue;
+                    }
                     let mut fixes = Vec::new();
-                    if *rule == "unit-tolerance"
+                    if *kind == UnitKind::Tolerance
                         && let Some(t) = TOLERANCE.find(found)
                         && let Some(open) = par.text.exact_loc(begin..begin)
                         && let Some(close) = par.text.after(begin + t.end())
@@ -1824,31 +1841,35 @@ impl Checker<'_> {
                         });
                     }
                     // Розміри й діапазон: одиниця біля кожного числа
-                    if matches!(*rule, "unit-dimensions" | "unit-range")
+                    if matches!(*kind, UnitKind::Dimensions | UnitKind::Range)
                         && let Some(exact) = par.text.exact_loc(range.clone())
-                        && let Some(new) = unit_rewrite(rule, found)
+                        && let Some(new) = unit_rewrite(*kind, found)
                     {
                         fixes.push(FixDraft {
                             title: format!("Записати «{new}»"),
                             edits: vec![(exact, new)],
                         });
                     }
-                    if *rule == "unit-space" {
-                        // Нерозривний проміжок між числом і одиницею: `5~мм`
-                        let digit = begin + found.chars().next().map_or(1, char::len_utf8);
-                        if let Some(at) = par.text.exact_loc(digit..digit) {
+                    if *kind == UnitKind::Space {
+                        // Нерозривний проміжок між числом і одиницею: `100~мм`
+                        if let Some(num) = NUMBER.find(found)
+                            && let Some(at) =
+                                par.text.exact_loc(begin + num.end()..begin + num.end())
+                        {
                             fixes.push(FixDraft {
                                 title: "Додати нерозривний проміжок (~)".into(),
                                 edits: vec![(at, "~".into())],
                             });
                         }
                     }
-                    self.add(
+                    if let Some(f) = self.add(
                         rule,
                         par.text.loc(range),
                         format!("{msg}{}", quote(found)),
                         fixes,
-                    );
+                    ) {
+                        f.clause = Some(clause);
+                    }
                 }
             }
         }
@@ -1868,7 +1889,7 @@ impl Checker<'_> {
         let at = |m: regex::Match| start + m.start()..start + m.end();
         if word.as_str().ends_with(['и', 'И']) {
             self.add(
-                "note-format",
+                "note-style",
                 par.text.loc(at(word)),
                 with_help(
                     "кілька приміток під одним словом «Примітки»",
@@ -1897,7 +1918,7 @@ impl Checker<'_> {
                     })
             };
             self.add(
-                "note-format",
+                "note-style",
                 par.text.loc(at(word)),
                 with_help(
                     if sign.is_empty() {
@@ -1926,7 +1947,7 @@ impl Checker<'_> {
                 edits: vec![(loc, letter.as_str().to_uppercase())],
             });
             self.add(
-                "note-format",
+                "note-style",
                 par.text.loc(range),
                 with_help("текст примітки з малої літери", "Почати з великої літери"),
                 fix.into_iter().collect(),
@@ -1972,7 +1993,7 @@ impl Checker<'_> {
                             edits: vec![(loc, String::new())],
                         });
                         self.add(
-                            "note-numbering",
+                            "note-style",
                             par.text.loc(start + word.start()..range.end),
                             with_help(
                                 "єдину примітку пронумеровано",
@@ -1988,7 +2009,7 @@ impl Checker<'_> {
                             edits: vec![(loc, format!(" {expected}"))],
                         });
                         self.add(
-                            "note-numbering",
+                            "note-style",
                             par.text.loc(start + word.start()..range.end),
                             format!(
                                 "примітку {expected} позначено номером {}",
@@ -2004,7 +2025,7 @@ impl Checker<'_> {
                             edits: vec![(loc, format!(" {expected}"))],
                         });
                         self.add(
-                            "note-numbering",
+                            "note-style",
                             par.text.loc(start + word.start()..end),
                             with_help(
                                 "приміток кілька, а цю не пронумеровано",
@@ -2353,7 +2374,7 @@ impl Checker<'_> {
                     let start = whole.start() + whole.as_str().find('[').unwrap_or(0);
                     // Дужки з формули чи коду (`$[3, 6]$`, `` `a[2]` ``) не є
                     // посиланнями: беруться лише набрані в тексті дослівно
-                    if !text.is_exact_at(start) {
+                    if !text.is_exact_at(start) || !text.is_prose(start..whole.end()) {
                         continue;
                     }
                     if let Some((n, expected)) = cite_out_of_order(&c, &mut seen) {
@@ -2448,23 +2469,22 @@ impl Checker<'_> {
 
 /// «80 х 25 х 50 мм» -> «80 мм × 25 мм × 50 мм», «від 1 до 5 мм» -> «від 1 мм
 /// до 5 мм», «10-20 МГц» -> «від 10 МГц до 20 МГц».
-fn unit_rewrite(rule: &str, found: &str) -> Option<String> {
-    static NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(NUM).unwrap());
+fn unit_rewrite(kind: UnitKind, found: &str) -> Option<String> {
     let numbers: Vec<&str> = NUMBER.find_iter(found).map(|m| m.as_str()).collect();
     let last = NUMBER.find_iter(found).last()?;
     let unit = found[last.end()..].trim();
     if unit.is_empty() || numbers.len() < 2 {
         return None;
     }
-    match rule {
-        "unit-dimensions" => Some(
+    match kind {
+        UnitKind::Dimensions => Some(
             numbers
                 .iter()
                 .map(|n| format!("{n} {unit}"))
                 .collect::<Vec<_>>()
                 .join(" × "),
         ),
-        "unit-range" if numbers.len() == 2 => Some(format!(
+        UnitKind::Range if numbers.len() == 2 => Some(format!(
             "від {} {unit} до {} {unit}",
             numbers[0], numbers[1]
         )),
@@ -2625,7 +2645,7 @@ impl Checker<'_> {
                 Element::Par(p) => {
                     all.push(p.look);
                     let role = p.role;
-                    // Примітки мають власний кегль і інтервал (`note-size`)
+                    // Примітки мають власний кегль і інтервал (`note-style`)
                     if body_start.is_some_and(|b| k >= b) && role != Role::Note {
                         body.push(p.look);
                         if role == Role::Text {
@@ -2751,7 +2771,7 @@ impl Checker<'_> {
             let look = &work.looks[i];
             if let Fact::Known(d, why) = &look.indent
                 && *d > 0.01
-                && !look.indent_all
+                && look.indent_all.is(&false)
             {
                 report(
                     (0, 0),

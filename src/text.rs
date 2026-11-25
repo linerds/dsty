@@ -19,6 +19,18 @@ pub struct Text {
     segs: Vec<Seg>,
 }
 
+/// Походження сегмента тексту: правила прози перевіряють лише [`SegKind::Prose`],
+/// щоб код, формули й посилання не давали хибних спрацювань.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegKind {
+    Prose,
+    Code,
+    Math,
+    Link,
+    Ref,
+    Mapped,
+}
+
 #[derive(Debug, Clone)]
 struct Seg {
     /// Байти в `s`.
@@ -28,6 +40,7 @@ struct Seg {
     src: Range<usize>,
     /// Текст сегмента збігається з вихідним кодом байт у байт.
     exact: bool,
+    kind: SegKind,
 }
 
 impl Text {
@@ -35,17 +48,40 @@ impl Text {
         &self.s
     }
 
-    /// Текст, що збігається з кодом з позиції `src_start`.
+    /// Текст, що збігається з кодом з позиції `src_start` (проза).
     pub fn push_exact(&mut self, s: &str, file: usize, src_start: usize) {
-        self.push(s, file, src_start..src_start + s.len(), true);
+        self.push(
+            s,
+            file,
+            src_start..src_start + s.len(),
+            true,
+            SegKind::Prose,
+        );
     }
 
-    /// Текст, що відповідає вузлу коду цілком (`--`, `\#`, виклик функції).
+    /// Текст прози, що відповідає вузлу коду цілком (`--`, `\#`, пробіл, лапки).
+    pub fn push_prose_mapped(&mut self, s: &str, file: usize, src: Range<usize>) {
+        self.push(s, file, src, false, SegKind::Prose);
+    }
+
+    /// Текст, що відповідає вузлу коду цілком (виклик функції, змінна).
     pub fn push_mapped(&mut self, s: &str, file: usize, src: Range<usize>) {
-        self.push(s, file, src, false);
+        self.push(s, file, src, false, SegKind::Mapped);
     }
 
-    fn push(&mut self, s: &str, file: usize, src: Range<usize>, exact: bool) {
+    /// Сегмент певного семантичного виду (`Code`, `Math`, `Link`, `Ref`).
+    pub fn push_kind(
+        &mut self,
+        s: &str,
+        file: usize,
+        src: Range<usize>,
+        kind: SegKind,
+        exact: bool,
+    ) {
+        self.push(s, file, src, exact, kind);
+    }
+
+    fn push(&mut self, s: &str, file: usize, src: Range<usize>, exact: bool, kind: SegKind) {
         if s.is_empty() {
             return;
         }
@@ -56,6 +92,7 @@ impl Text {
             file,
             src,
             exact,
+            kind,
         });
     }
 
@@ -93,7 +130,31 @@ impl Text {
     /// Чи байт `byte` тексту стоїть у коді дослівно (а не з `raw`, формули чи
     /// виклику функції).
     pub fn is_exact_at(&self, byte: usize) -> bool {
-        self.seg_at(byte).is_some_and(|seg| seg.exact)
+        self.seg_at(byte)
+            .is_some_and(|seg| seg.exact && seg.kind == SegKind::Prose)
+    }
+
+    /// Чи кожен сегмент, що перетинає `range`, належить до звичайної прози
+    /// (а не до `raw`, формули, посилання чи виклику).
+    pub fn is_prose(&self, range: Range<usize>) -> bool {
+        if range.is_empty() {
+            return self
+                .seg_at(range.start)
+                .is_some_and(|seg| seg.kind == SegKind::Prose);
+        }
+        let mut i = self.segs.partition_point(|seg| seg.at.end <= range.start);
+        let mut covered = false;
+        while let Some(seg) = self.segs.get(i) {
+            if seg.at.start >= range.end {
+                break;
+            }
+            if seg.kind != SegKind::Prose {
+                return false;
+            }
+            covered = true;
+            i += 1;
+        }
+        covered
     }
 
     /// Місце шматка тексту в коді. Якщо шматок вийшов з одного точного

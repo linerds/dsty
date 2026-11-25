@@ -303,7 +303,7 @@ mod tests {
                 table: true,
             },
         );
-        assert!(all.contains("#show text.where(fill: rgb(\"#010001\"))"));
+        assert!(all.contains("#show text.where(features: (dtyk: 1))"));
         assert!(all.contains("#include \"/src/main.typ\""));
         let lean = wrapper(
             "main.typ",

@@ -53,12 +53,12 @@ pub struct Style {
     pub font: Fact<String>,
     pub leading: Fact<Length>,
     /// Змінено `top-edge` чи `bottom-edge`: крок рядків з `leading` не вивести.
-    pub edges: bool,
+    pub edges: Fact<bool>,
     /// Абзацний відступ (`first-line-indent`).
     pub indent: Fact<Length>,
     /// Відступ і в першому абзаці після заголовка, рисунка, переліку
     /// (`first-line-indent: (all: true)`); типово ні.
-    pub indent_all: bool,
+    pub indent_all: Fact<bool>,
     pub page: Fact<PageSize>,
     /// Береги: верхній, правий, нижній, лівий; `None`: `auto`.
     pub margins: [Fact<Option<Length>>; 4],
@@ -101,12 +101,12 @@ impl Default for Style {
                 },
                 At::default("par", &["leading"]),
             ),
-            edges: false,
+            edges: Fact::typst(false, At::default("text", &["top-edge", "bottom-edge"])),
             indent: Fact::typst(
                 Length::default(),
                 At::default("par", &["first-line-indent"]),
             ),
-            indent_all: false,
+            indent_all: Fact::typst(false, At::default("par", &["first-line-indent"])),
             page: Fact::typst(
                 PageSize::paper(defaults::PAPER),
                 At::default("page", &["paper", "width", "height", "flipped"]),
@@ -232,7 +232,9 @@ impl Style {
             indent: self.indent.derive(self.indent_pt(), || {
                 At::default("par", &["first-line-indent"])
             }),
-            indent_all: self.indent_all,
+            indent_all: self
+                .indent_all
+                .placed(|| At::default("par", &["first-line-indent"])),
             paper: self.page.derive(
                 self.page.known().map(|p| Paper {
                     name: p.name.clone(),
@@ -250,7 +252,9 @@ impl Style {
         self.size = Fact::Unknown;
         self.font = Fact::Unknown;
         self.leading = Fact::Unknown;
+        self.edges = Fact::Unknown;
         self.indent = Fact::Unknown;
+        self.indent_all = Fact::Unknown;
         self.page = Fact::Unknown;
         self.margins = [Fact::Unknown, Fact::Unknown, Fact::Unknown, Fact::Unknown];
         self.lang = Fact::Unknown;
@@ -316,6 +320,7 @@ impl Style {
                     self.weight = Fact::Unknown;
                     self.italic = Fact::Unknown;
                     self.black = Fact::Unknown;
+                    self.edges = Fact::Unknown;
                 }
                 if let Some(a) = set.arg("lang") {
                     self.lang = match &a.value {
@@ -361,14 +366,15 @@ impl Style {
                         None => Fact::Unknown,
                     };
                 }
-                if set.arg("top-edge").is_some() || set.arg("bottom-edge").is_some() {
-                    self.edges = true;
+                if let Some(a) = set.arg("top-edge").or_else(|| set.arg("bottom-edge")) {
+                    self.edges = Fact::set(true, origin(a));
                 }
             }
             "par" => {
                 if set.open {
                     self.leading = Fact::Unknown;
                     self.indent = Fact::Unknown;
+                    self.indent_all = Fact::Unknown;
                     self.justify = Fact::Unknown;
                 }
                 if let Some(a) = set.arg("justify") {
@@ -394,9 +400,10 @@ impl Style {
                         },
                         _ => None,
                     };
-                    if let Some((_, all)) = amount {
-                        self.indent_all = all;
-                    }
+                    self.indent_all = match amount {
+                        Some((_, all)) => Fact::set(all, origin(a)),
+                        None => Fact::Unknown,
+                    };
                     let amount = amount.map(|(l, _)| l);
                     self.indent = match amount {
                         Some(l) => Fact::set(l, origin(a)),
@@ -410,6 +417,19 @@ impl Style {
     }
 
     fn apply_page(&mut self, set: &SetEffect, origin: &dyn Fn(&SetArg) -> Origin) {
+        if set.open {
+            self.page_numbering = Fact::Unknown;
+            self.number_align = Fact::Unknown;
+            self.page_header = Fact::Unknown;
+            self.page_parts = Rc::new(
+                ["header", "footer", "background", "foreground"]
+                    .iter()
+                    .map(|n| ((*n).to_owned(), Fact::Unknown))
+                    .collect(),
+            );
+            self.page = Fact::Unknown;
+            self.margins = [Fact::Unknown, Fact::Unknown, Fact::Unknown, Fact::Unknown];
+        }
         if let Some(a) = set.arg("numbering") {
             self.page_numbering = match &a.value {
                 v @ (Value::None | Value::Str(_) | Value::Func(_)) => {
@@ -438,19 +458,6 @@ impl Style {
                 parts.retain(|(n, _)| n != name);
                 parts.push((name.to_owned(), Fact::set(a.value.clone(), origin(a))));
             }
-        }
-        if set.open {
-            self.page_numbering = Fact::Unknown;
-            self.number_align = Fact::Unknown;
-            self.page_header = Fact::Unknown;
-            self.page_parts = Rc::new(
-                ["header", "footer", "background", "foreground"]
-                    .iter()
-                    .map(|n| ((*n).to_owned(), Fact::Unknown))
-                    .collect(),
-            );
-            self.page = Fact::Unknown;
-            self.margins = [Fact::Unknown, Fact::Unknown, Fact::Unknown, Fact::Unknown];
         }
         if let Some(a) = set.arg("paper") {
             self.page = match &a.value {
@@ -549,7 +556,7 @@ impl Style {
     /// `leading` в em, якщо з нього можна вивести крок рядків.
     pub fn leading_em(&self) -> Option<f64> {
         let l = self.leading.known()?;
-        if self.edges {
+        if !self.edges.is(&false) {
             return None;
         }
         match l.pt {

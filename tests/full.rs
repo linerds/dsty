@@ -258,7 +258,7 @@ $ x = 1 $ <eq>
             ("font-style", "«червоним»"),
             ("formula-center", "left"),
             ("formula-where-indent", "12,5 мм"),
-            ("note-size", "кеглем 14"),
+            ("note-style", "кеглем 14"),
             ("appendix-letter", "«З»"),
             ("new-page", "додаток «Код програми»"),
         ],
@@ -694,5 +694,368 @@ fn defaults_match_typst() {
         "{} має інші типові значення, ніж src/defaults.rs:\n{}",
         String::from_utf8_lossy(&version.stdout).trim(),
         wrong.join("\n")
+    );
+}
+
+/// `--fix --full` перезбирає факти розкладки після запису виправлень, а не
+/// показує зауваження зі старої компіляції.
+#[test]
+fn fix_full_recollects_facts() {
+    if typst().is_none() {
+        return;
+    }
+    let dir = temp_dir("fix-full");
+    let main = dir.join("main.typ");
+    std::fs::write(
+        &main,
+        r#"#set text(lang: "uk", size: 12pt)
+#set heading(numbering: "1.1")
+= Вступ
+Текст вступу.
+"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dsty"))
+        .current_dir(&dir)
+        .args(["check", "--fix", "--full", "--format", "text", "main.typ"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let fixed = std::fs::read_to_string(&main).unwrap();
+    assert!(
+        fixed.contains("#heading(numbering: none)[Вступ]"),
+        "{fixed}"
+    );
+    assert!(fixed.contains("size: 14pt"), "{fixed}");
+    // Після виправлення `heading-numbered` зникає і з повної перевірки (факти перезібрано)
+    assert!(!stdout.contains("[heading-numbered]"), "{stdout}");
+    assert!(
+        !stdout.contains("основний текст набрано кеглем"),
+        "{stdout}"
+    );
+}
+
+/// Шаблон із `set text(fill: black)` / `luma(0)` на заголовках і таблицях не
+/// стирає позначки проб (`dtyk`).
+#[test]
+fn template_text_fill_does_not_clobber_probes() {
+    if typst().is_none() {
+        return;
+    }
+    let dir = temp_dir("fill-clobber");
+    let src = r##"#set text(lang: "uk", size: 14pt)
+#set heading(numbering: "1.1")
+#show heading: set text(fill: black)
+#show table: set text(fill: luma(0))
+#show figure: set text(fill: rgb("#000000"))
+#show outline: set heading(numbering: "1")
+#outline()
+= Розділ
+Текст розділу, досить довгий для ключа прив'язки.
+#figure(
+  table(columns: 2, [Комірка таблиці з чорним текстом], [Значення]),
+  caption: [Таблиця з чорним текстом],
+) <t>
+"##;
+    let found = check(&dir, src, &[]);
+    expect(&found, &[("heading-numbered", "надруковано з номером")]);
+    // Перевіряємо й самі факти: прогони заголовка лишились `H`, а комірка
+    // таблиці не стала абзацом основного тексту (`kind == ""`)
+    let main = dir.join("main.typ");
+    let facts = full::collect(&main, &Settings::default(), &Options::default()).unwrap();
+    assert!(
+        facts
+            .entries
+            .iter()
+            .any(|e| matches!(&e.item, full::facts::Item::Run(r) if r.kind == "H")),
+        "{:?}",
+        facts.entries
+    );
+    assert!(
+        !facts.entries.iter().any(|e| matches!(
+            &e.item,
+            full::facts::Item::Par(p) if p.kind.is_empty() && p.head.contains("Комірка")
+        )),
+        "{:?}",
+        facts.entries
+    );
+}
+
+/// Розділ із самим блоком коду не вважається «заголовком без тексту» (`heading-orphan`).
+#[test]
+fn heading_before_raw_block_is_not_orphan() {
+    if typst().is_none() {
+        return;
+    }
+    let dir = temp_dir("raw-content");
+    let found = check(
+        &dir,
+        r#"#set text(lang: "uk")
+= Лістинг коду
+```rust
+fn main() { println!("ok"); }
+```
+#pagebreak()
+= Наступний розділ
+Текст наступного розділу.
+"#,
+        &[],
+    );
+    assert!(
+        !found.iter().any(|(r, _)| r == "heading-orphan"),
+        "{found:?}"
+    );
+}
+
+/// «Продовження…» у звичайному тексті нижче за перенесену таблицю не
+/// приховує відсутності напису над перенесеною частиною таблиці; а кількість у
+/// переліку реферату перевіряється `abstract-counts`.
+#[test]
+fn table_continuation_position_and_abstract_list_counts() {
+    if typst().is_none() {
+        return;
+    }
+    let dir = temp_dir("cont-and-abstract");
+    let found = check(
+        &dir,
+        r#"#set text(lang: "uk")
+#show figure: set block(breakable: true)
+#heading(numbering: none)[Реферат]
+Відомості про обсяг звіту:
+- 99 с.;
+- 0 рис.
+#pagebreak()
+= Розділ
+Посилання на @big[таблицю].
+#figure(
+  table(columns: 2, table.header[А][Б], ..range(55).map(i => (str(i), str(i))).flatten()),
+  caption: [Велика таблиця],
+) <big>
+
+Продовження досліджень планується в наступних розділах роботи.
+"#,
+        &[],
+    );
+    expect(
+        &found,
+        &[
+            ("abstract-counts", "«99 с.»"),
+            ("table-continuation", "«Велика таблиця»"),
+        ],
+    );
+}
+
+/// `--full` підставляє `Basis::Layout` для `page-size`, коли статичний обхід
+/// не може простежити непрозорий шаблон (`Fact::Unknown`), і перевіряє
+/// фактичний формат надрукованих посилань на джерела (`bibliography-style`)
+/// навіть для нестандартного файлу `.csl`.
+#[test]
+fn full_upgrades_opaque_page_and_checks_custom_csl_style() {
+    if typst().is_none() {
+        return;
+    }
+    let dir = temp_dir("opaque-and-csl");
+    std::fs::write(
+        dir.join("refs.bib"),
+        "@book{knuth, author = {Knuth, Donald}, title = {TAOCP}, year = {1997}}\n",
+    )
+    .unwrap();
+    // Мінімальний CSL-стиль, що друкує `(Knuth, 1997)`, але назва файлу
+    // `custom.csl` не потрапляє до статичного списку `is_author_date`
+    std::fs::write(
+        dir.join("custom.csl"),
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<style xmlns="http://purl.org/net/xbiblio/csl" class="in-text" version="1.0">
+  <info><title>Custom</title><id>custom</id></info>
+  <citation>
+    <layout prefix="(" suffix=")" delimiter="; ">
+      <names variable="author"><name form="short"/></names>
+      <date variable="issued" prefix=", "><date-part name="year"/></date>
+    </layout>
+  </citation>
+  <bibliography>
+    <layout><text variable="title"/></layout>
+  </bibliography>
+</style>
+"#,
+    )
+    .unwrap();
+    let src = r#"#let mk(body) = {
+  // Динамічний вираз, непрозорий для статики: `set page(..d)` з невідомою умовою
+  let p = if str(1) == "1" { (paper: "a5") } else { (paper: "a4") }
+  set page(..p)
+  body
+}
+#show: mk
+#set text(lang: "uk")
+= Вступ
+У роботі використано джерело @knuth.
+#bibliography("refs.bib", style: "custom.csl", title: [Перелік джерел посилання])
+"#;
+    let found = check(&dir, src, &[]);
+    expect(
+        &found,
+        &[
+            ("page-size", "148 мм × 210 мм"),
+            ("bibliography-style", "Knuth"),
+        ],
+    );
+}
+
+/// Якщо документ уже задає `set page(paper: …)` у коді, `--full` не дублює
+/// `page-size` через непрозорий підблок усередині документа.
+#[test]
+fn full_does_not_duplicate_known_page_size_on_opaque_subscope() {
+    if typst().is_none() {
+        return;
+    }
+    let dir = temp_dir("opaque-subscope");
+    let src = r#"#set page(paper: "presentation-16-9")
+#set text(lang: "uk")
+= Вступ
+Перший абзац.
+#{
+  let d = if str(1) == "1" { (fill: white) } else { (fill: black) }
+  set page(..d)
+  [Другий абзац у непрозорому підблоці.]
+}
+"#;
+    let found = check(&dir, src, &[]);
+    let page_sizes: Vec<_> = found.iter().filter(|(r, _)| r == "page-size").collect();
+    assert_eq!(page_sizes.len(), 1, "{page_sizes:?}");
+    assert!(
+        page_sizes[0].1.contains("presentation-16-9"),
+        "{page_sizes:?}"
+    );
+}
+
+/// Статична модель (`Work`) збігається з фактичними стилями, берегами,
+/// підписами й позначками переліків від `typst eval`.
+#[test]
+fn static_model_conforms_to_typst() {
+    let Some(typst) = typst() else {
+        return;
+    };
+    let has_eval = Command::new(&typst)
+        .args(["eval", "--help"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !has_eval {
+        return;
+    }
+    let dir = temp_dir("conform");
+    let main = dir.join("main.typ");
+    let src = r#"#set page(paper: "a4", margin: (top: 20mm, bottom: 20mm, left: 25mm, right: 10mm), numbering: "1", number-align: top + right)
+#set text(lang: "uk", size: 14pt)
+#set par(justify: true, leading: 0.95em, first-line-indent: (amount: 12.5mm, all: true))
+#set heading(numbering: "1.1")
+#set figure.caption(separator: [ -- ])
+#show figure.where(kind: table): set figure.caption(position: top)
+#set list(marker: [--])
+#set enum(numbering: "1)")
+#set math.equation(numbering: "(1)")
+= Розділ
+Текст розділу.
+#figure(rect(width: 4cm, height: 2cm), caption: [Схема]) <f>
+#figure(table(columns: 2, [А], [Б]), caption: [Таблиця]) <t>
+$ x = y $ <eq>
+- перший;
+- другий.
++ крок один;
++ крок два.
+"#;
+    std::fs::write(&main, src).unwrap();
+    let load = |p: &Path| std::fs::read_to_string(p).ok();
+    let (work, _) = dsty::model::build(&dir, &main, &load, true).unwrap();
+
+    let query = r#"{
+      let plain(c) = if type(c) == str { c } else if type(c) != content { "" } else if c.has("text") { c.text } else if c.has("children") { c.children.fold("", (a, x) => a + plain(x)) } else if c.has("body") { plain(c.body) } else if c.func() == [ ].func() { " " } else { "" }
+      let caps = query(figure.caption).map(c => (sep: plain(c.separator), top: c.position == top))
+      let ls = query(list).map(l => plain(if type(l.marker) == array { l.marker.at(0) } else { l.marker }))
+      let es = query(enum).map(e => plain(numbering(e.numbering, 1)))
+      let st = query(<cf>).last().value
+      (caps: caps, ls: ls, es: es, st: st)
+    }"#;
+    let probe = r#"#show par: it => {
+      context [#metadata((size: text.size.to-absolute().pt(), w: page.width.to-absolute().pt(), h: page.height.to-absolute().pt()))<cf>]
+      it
+    }
+    #include "/main.typ"
+    "#;
+    let mut child = Command::new(&typst)
+        .args(["eval", "--in", "-", "--root"])
+        .arg(&dir)
+        .arg(query)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write as _;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(probe.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+
+    let par_look = work
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            dsty::work::Element::Par(p) => Some(&work.looks[p.look]),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        (par_look.text.size.known().copied().unwrap() - v["st"]["size"].as_f64().unwrap()).abs()
+            < 0.05
+    );
+    let paper = par_look.paper.known().unwrap();
+    assert!((paper.w.unwrap() - v["st"]["w"].as_f64().unwrap()).abs() < 0.1);
+    assert!((paper.h.unwrap() - v["st"]["h"].as_f64().unwrap()).abs() < 0.1);
+
+    let figs: Vec<_> = work
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            dsty::work::Element::Figure(f) => Some(f),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(figs.len(), 2);
+    for (i, f) in figs.iter().enumerate() {
+        assert_eq!(
+            f.look.separator.known().map(|s| s.trim()),
+            Some(v["caps"][i]["sep"].as_str().unwrap().trim())
+        );
+        assert_eq!(
+            f.look.top.known().copied(),
+            Some(v["caps"][i]["top"].as_bool().unwrap())
+        );
+    }
+
+    let lists: Vec<_> = work
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            dsty::work::Element::List(l) => Some(l),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        lists[0].marker.known().map(String::as_str),
+        v["ls"][0].as_str()
+    );
+    assert_eq!(
+        lists[1].marker.known().map(String::as_str),
+        v["es"][0].as_str()
     );
 }

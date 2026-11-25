@@ -114,7 +114,7 @@ fn lists_rules() {
     assert!(
         stdout
             .lines()
-            .any(|l| l.starts_with("unit-space ") && l.contains(" static enable "))
+            .any(|l| l.starts_with("units ") && l.contains(" static enable "))
     );
 }
 

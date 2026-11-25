@@ -1105,7 +1105,7 @@ impl Walker<'_> {
     fn inline_markup(&mut self, cx: &Cx, markup: ast::Markup, out: &mut Text) {
         for e in markup.exprs() {
             if let Expr::Parbreak(_) = e {
-                out.push_mapped(" ", cx.file, cx.range(e.to_untyped()));
+                out.push_prose_mapped(" ", cx.file, cx.range(e.to_untyped()));
             } else {
                 self.inline(cx, e, out);
             }
@@ -1117,19 +1117,29 @@ impl Walker<'_> {
         let node = expr.to_untyped();
         match expr {
             Expr::Text(t) => out.push_exact(t.get(), cx.file, cx.range(node).start),
-            Expr::Space(_) | Expr::Linebreak(_) => out.push_mapped(" ", cx.file, cx.range(node)),
-            Expr::Escape(e) => out.push_mapped(&e.get().to_string(), cx.file, cx.range(node)),
-            Expr::Shorthand(s) => out.push_mapped(&s.get().to_string(), cx.file, cx.range(node)),
+            Expr::Space(_) | Expr::Linebreak(_) => {
+                out.push_prose_mapped(" ", cx.file, cx.range(node))
+            }
+            Expr::Escape(e) => out.push_prose_mapped(&e.get().to_string(), cx.file, cx.range(node)),
+            Expr::Shorthand(s) => {
+                out.push_prose_mapped(&s.get().to_string(), cx.file, cx.range(node))
+            }
             Expr::SmartQuote(q) => {
-                out.push_mapped(if q.double() { "\"" } else { "'" }, cx.file, cx.range(node))
+                out.push_prose_mapped(if q.double() { "\"" } else { "'" }, cx.file, cx.range(node))
             }
             Expr::Strong(s) => self.inline_markup(cx, s.body(), out),
             Expr::Emph(e) => {
                 let mut inner = Text::default();
                 self.inline_markup(cx, e.body(), &mut inner);
+                let loc = cx.loc(e.to_untyped());
+                let base = self.styles[self.para_style].clone();
+                let origins = self.origins(&loc);
+                let style = look::emph(&mut self.ev, &base, &|set, arg| origins.of(set, arg));
+                self.styles.push(style);
+                let look = self.styles.len() - 1;
                 self.work.runs.push(work::Run {
-                    loc: cx.loc(e.to_untyped()),
-                    look: self.para_style,
+                    loc,
+                    look,
                     par: self.para_style,
                     emph: true,
                     text: inner.trimmed().to_owned(),
@@ -1139,15 +1149,43 @@ impl Walker<'_> {
             }
             Expr::Raw(raw) => {
                 let text: Vec<&str> = raw.lines().map(|l| l.get().as_str()).collect();
-                out.push_mapped(&text.join(" "), cx.file, cx.range(node));
+                out.push_kind(
+                    &text.join(" "),
+                    cx.file,
+                    cx.range(node),
+                    crate::text::SegKind::Code,
+                    false,
+                );
             }
-            Expr::Link(link) => out.push_exact(link.get(), cx.file, cx.range(node).start),
+            Expr::Link(link) => {
+                let start = cx.range(node).start;
+                let s = link.get();
+                out.push_kind(
+                    s,
+                    cx.file,
+                    start..start + s.len(),
+                    crate::text::SegKind::Link,
+                    true,
+                );
+            }
             Expr::Ref(r) => {
                 self.add_ref(r.target());
                 self.ref_use(cx, node, r.target(), r.supplement().is_some(), out);
-                out.push_mapped(&node.full_text(), cx.file, cx.range(node));
+                out.push_kind(
+                    &node.full_text(),
+                    cx.file,
+                    cx.range(node),
+                    crate::text::SegKind::Ref,
+                    false,
+                );
             }
-            Expr::Equation(_) => out.push_mapped(&node.full_text(), cx.file, cx.range(node)),
+            Expr::Equation(_) => out.push_kind(
+                &node.full_text(),
+                cx.file,
+                cx.range(node),
+                crate::text::SegKind::Math,
+                false,
+            ),
             Expr::FuncCall(call) => self.inline_call(cx, call, out),
             Expr::ContentBlock(block) => self.inline_markup(cx, block.body(), out),
             Expr::Str(s) => out.push_mapped(&s.get(), cx.file, cx.range(node)),
@@ -1171,13 +1209,15 @@ impl Walker<'_> {
         match callee_name(call) {
             // Текст виноски друкується внизу сторінки, а не в рядку
             Some("footnote") => {
+                let mut body = Text::default();
+                for arg in content_args(call) {
+                    self.inline(cx, arg, &mut body);
+                }
                 if !matches!(positional(call).first(), Some(Expr::Label(_))) {
                     self.work.footnotes.at.push(cx.loc(call.to_untyped()));
+                    let head: String = body.trimmed().chars().take(80).collect();
+                    self.work.footnotes.heads.push(head);
                     self.footnote_style.get_or_insert(self.para_style);
-                }
-                for arg in content_args(call) {
-                    let mut ignored = Text::default();
-                    self.inline(cx, arg, &mut ignored);
                 }
             }
             Some("ref") => {
@@ -1187,7 +1227,13 @@ impl Walker<'_> {
                     let supplement = named(call, "supplement").is_some();
                     self.ref_use(cx, node, l.get(), supplement, out);
                 }
-                out.push_mapped(&node.full_text(), cx.file, cx.range(node));
+                out.push_kind(
+                    &node.full_text(),
+                    cx.file,
+                    cx.range(node),
+                    crate::text::SegKind::Ref,
+                    false,
+                );
             }
             // `link(<мітка>)[текст]` теж посилається на елемент
             Some("link") => {
@@ -1323,11 +1369,7 @@ impl Walker<'_> {
         let follows = self.last == Last::Equation;
         // Оформлення формули обчислюється після обходу: її show-правила
         // можуть залежати від посилань на неї
-        let look = Rc::new(work::EquationLook {
-            numbering: Fact::Unknown,
-            number_align: Fact::Unknown,
-            align: None,
-        });
+        let look = Rc::new(work::EquationLook::default());
         let counter = self.counters.clone();
         let appendix = scope.appendix(&loc);
         self.emit(
@@ -2270,7 +2312,7 @@ impl Walker<'_> {
     }
 
     /// Номери сторінок: на титульному аркуші (абзаци до першого заголовка) і в
-    /// основному тексті.
+    /// кожній області основного тексту з власним `set page(…)`.
     fn page_look(&mut self) {
         let elements = &self.work.elements;
         // Без заголовків (презентація): усе — основний текст
@@ -2284,23 +2326,34 @@ impl Walker<'_> {
             _ => Fact::Unknown,
         };
         let first = first.unwrap_or(0);
-        let body = elements
-            .get(first..)
-            .unwrap_or_default()
-            .iter()
-            .find_map(|e| match e {
+        let mut body_styles: Vec<usize> = Vec::new();
+        for (k, e) in elements.iter().enumerate().skip(first) {
+            let s = match e {
                 Element::Par(p) => Some(p.look),
+                Element::Heading(_) => match self.pending.get(k) {
+                    Some(Pending::Heading(style, _)) => Some(*style),
+                    _ => None,
+                },
                 _ => None,
-            })
-            .or(match self.pending.get(first) {
-                Some(Pending::Heading(style, _)) => Some(*style),
-                _ => None,
-            })
+            };
+            if let Some(s) = s
+                && !body_styles.contains(&s)
+            {
+                body_styles.push(s);
+            }
+        }
+        if body_styles.is_empty() {
             // Документ без тексту (лише зображення): налаштування наприкінці
-            .unwrap_or(self.style_now);
-        let style = self.styles[body].clone();
-        let title = title.map(|t| self.styles[t].clone());
-        self.work.pages = Some(look::pages(&mut self.ev, &style, title.as_ref()));
+            body_styles.push(self.style_now);
+        }
+        let title_style = title.map(|t| self.styles[t].clone());
+        let mut pages = Vec::new();
+        for (i, s) in body_styles.into_iter().enumerate() {
+            let style = self.styles[s].clone();
+            let t = if i == 0 { title_style.as_ref() } else { None };
+            pages.push(look::pages(&mut self.ev, &style, t));
+        }
+        self.work.pages = pages;
         self.work.title_page = title_page;
     }
 
